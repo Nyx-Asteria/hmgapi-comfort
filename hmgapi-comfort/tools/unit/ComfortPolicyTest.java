@@ -1,29 +1,14 @@
 package dev.lemoyne.comfort;
 
-import java.io.File;
-import java.nio.file.Files;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Off-car unit tests for ComfortPolicy, OccupantSignalProbe, and ComfortUsbExporter.
+ * Off-car unit tests for ComfortPolicy, ComfortConfig, and OccupantSignalProbe.
  */
 public final class ComfortPolicyTest {
     private static int fail;
-
-    @SuppressWarnings("unused")
-    public interface SampleCarIface {
-        int getPassSeatBelt();
-        boolean IsCarMoving();
-        int[] getSeatStates();
-        String getVIN();
-        int getSeatByIndex(int idx);
-        void setSeatHeat(int level);
-    }
 
     private static void check(String what, Object want, Object got) {
         String w = String.valueOf(want), g = String.valueOf(got);
@@ -199,68 +184,27 @@ public final class ComfortPolicyTest {
         check("hv.ready=1 with gear.park=0 IS confirmed out of Park", true,
                 ComfortPolicy.isConfirmedOutOfPark(state("hv.ready", "1", "gear.park", "0")));
 
-        // 11. OccupantSignalProbe word-aware privacy filter & read-only getter safety
-        check("allows passenger / PassDoor", true, OccupantSignalProbe.isSafeSignalName("BCM.getPassDoorOpen"));
-        check("allows passenger seat", true, OccupantSignalProbe.isSafeSignalName("BCM.getPassengerSeatBelt"));
-        check("allows telltale (not tel)", true, OccupantSignalProbe.isSafeSignalName("CLU.getSeatBeltTelltale"));
-        check("allows IsCarMoving / driving (not vin)", true, OccupantSignalProbe.isSafeSignalName("HSCAN.IsCarMoving"));
-        check("allows latchState (not lat)", true, OccupantSignalProbe.isSafeSignalName("BCM.getRearLatchState"));
-        check("blocks getVIN", false, OccupantSignalProbe.isSafeSignalName("SYS.getVIN"));
-        check("blocks getVIN2", false, OccupantSignalProbe.isSafeSignalName("HSCAN.getVIN2"));
-        check("blocks serialNo", false, OccupantSignalProbe.isSafeSignalName("SYS.getSerialNo"));
-        check("blocks phoneNumber", false, OccupantSignalProbe.isSafeSignalName("BT.getPhoneNumber"));
-        check("blocks telNumber", false, OccupantSignalProbe.isSafeSignalName("MODEM.getTelNumber"));
-        check("blocks password / passcode / pin", false,
-                OccupantSignalProbe.isSafeSignalName("USM.getPassword")
-                        || OccupantSignalProbe.isSafeSignalName("USM.getPasscode")
-                        || OccupantSignalProbe.isSafeSignalName("USM.getPinCode"));
-        check("blocks GPS / latitude / MAC", false,
-                OccupantSignalProbe.isSafeSignalName("NAVI.getGpsLat")
-                        || OccupantSignalProbe.isSafeSignalName("NAVI.getLatitude")
-                        || OccupantSignalProbe.isSafeSignalName("WIFI.getMacAddr"));
-
-        check("safe zero-arg int getter allowed", true,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("getPassSeatBelt")));
-        check("safe PascalCase Is* boolean getter allowed", true,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("IsCarMoving")));
-        check("safe int[] getter allowed", true,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("getSeatStates")));
-        check("String VIN getter rejected", false,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("getVIN")));
-        check("parameterized getter rejected from direct invocation", false,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("getSeatByIndex", int.class)));
-        check("mutator set* rejected", false,
-                OccupantSignalProbe.isSafeGetterMethod(SampleCarIface.class.getMethod("setSeatHeat", int.class)));
-
-        // 12. OccupantSignalProbe baseline diffing + walk-around [TOGGLED] retention + noisy counter filter
+        // 11. LoopbackServer + LoopbackClient round-trip for OCCUPANCY, CABIN_STATE, SeatCapabilities & WAKE
         final Map<String, String> liveSignals = new LinkedHashMap<String, String>();
-        liveSignals.put("BCM.getPassOccupant", "0");
-        liveSignals.put("HSCAN.getPassSeatBelt", "0");
-        liveSignals.put("HSCAN.getOdometer", "12340");
-        liveSignals.put("SYS.getVIN", "SHOULD_BE_BLOCKED");
+        liveSignals.put("HSCAN.getOccupancy", "2");
+        liveSignals.put("SYS.getClassStatus", "2");
+        liveSignals.put("HSCAN.getAsstStBltSwSta", "1");
+        liveSignals.put("BCM.getIGNStatus", "true");
+        liveSignals.put("DATC.isIGN3Status", "true");
+        liveSignals.put("BLACKSCREEN.isBlackScreenShown", "false");
+        liveSignals.put("POWER.isAvPowerOff", "false");
+        liveSignals.put("POWER.isDisplayOffMode", "false");
+        liveSignals.put("BCM.getDrvSeatHeatOption", "2");
+        liveSignals.put("BCM.getAstSeatHeatOption", "2");
+        liveSignals.put("BCM.getRLSeatHeatOption", "0");
+        liveSignals.put("BCM.getRRSeatHeatOption", "0");
+        liveSignals.put("PUSH.outside_temp_f", "33.5");
+        liveSignals.put("PUSH.outside_temp", "0.8");
+        liveSignals.put("PUSH.wheel_heat", "0");
+        liveSignals.put("PUSH.datc_sentinel", "0");
 
         final int[] wakeCount = new int[] { 0 };
         OccupantSignalProbe.SignalSource mockSrc = new OccupantSignalProbe.SignalSource() {
-            @Override
-            public String serviceStatusSummary() {
-                return "BCM=YES(1) HSCAN=YES(2)";
-            }
-
-            @Override
-            public String deviceBuildSummary() {
-                return "Ioniq5 / NEEV23SE / 260903";
-            }
-
-            @Override
-            public List<String> signatureInventory() {
-                return Collections.singletonList("BCMListener.onPassSeatBeltChanged(int) -> void");
-            }
-
-            @Override
-            public Map<String, String> readSignals(boolean fullScan) {
-                return new LinkedHashMap<String, String>(liveSignals);
-            }
-
             @Override
             public OccupantSignalProbe.PassengerPresence readPassengerPresence() {
                 return OccupantSignalProbe.PassengerPresence.fromSignalMap(liveSignals);
@@ -282,52 +226,13 @@ public final class ComfortPolicyTest {
             }
         };
 
-        OccupantSignalProbe probe = new OccupantSignalProbe(mockSrc, "UID 1000 test");
-        probe.markBaseline("Solo driver");
-        check("initial baseline has 0 diffs", 0, probe.getChangedCount());
-        check("auto-capture enabled after markBaseline", true, probe.isAutoCaptureActive());
-
-        // Simulate solo user walking to passenger seat, buckling & unbuckling belt, and leaving bag on seat
-        liveSignals.put("BCM.getPassOccupant", "1");
-        liveSignals.put("HSCAN.getPassSeatBelt", "1");
-        liveSignals.put("HSCAN.getOdometer", "12341");
-        probe.poll(true);
-
-        liveSignals.put("HSCAN.getPassSeatBelt", "0");
-        liveSignals.put("HSCAN.getOdometer", "12342");
-        probe.poll(true);
-
-        check("counts both [ACTIVE] occupant diff and [TOGGLED] belt (ignores odometer & blocked VIN)",
-                2, probe.getChangedCount());
-        String fullReport = probe.buildFullReport(false, "seat_state[drv=2, psg=2]");
-        check("report marks active occupant diff", true,
-                fullReport.contains("BCM.getPassOccupant : 0 -> 1  [ACTIVE]"));
-        check("report retains walk-around toggled belt history 0 -> 1 -> 0", true,
-                fullReport.contains("HSCAN.getPassSeatBelt : 0 -> 1 -> 0  [TOGGLED]"));
-        check("report includes listener signature inventory", true,
-                fullReport.contains("BCMListener.onPassSeatBeltChanged(int) -> void"));
-        check("report never leaks blocked VIN signal", false,
-                fullReport.contains("SHOULD_BE_BLOCKED") || fullReport.contains("SYS.getVIN"));
-
-        // 13. LoopbackServer + LoopbackClient round-trip & OCCUPANCY / CABIN_STATE / WAKE fast queries
-        liveSignals.put("HSCAN.getOccupancy", "2");
-        liveSignals.put("SYS.getClassStatus", "2");
-        liveSignals.put("HSCAN.getAsstStBltSwSta", "1");
-        liveSignals.put("BCM.getIGNStatus", "true");
-        liveSignals.put("DATC.isIGN3Status", "true");
-        liveSignals.put("BLACKSCREEN.isBlackScreenShown", "false");
-        liveSignals.put("POWER.isAvPowerOff", "false");
-        liveSignals.put("POWER.isDisplayOffMode", "false");
-        liveSignals.put("PUSH.outside_temp_f", "33.5");
-        liveSignals.put("PUSH.outside_temp", "0.8");
-        liveSignals.put("PUSH.wheel_heat", "0");
-        liveSignals.put("PUSH.datc_sentinel", "0");
+        OccupantSignalProbe probe = new OccupantSignalProbe(mockSrc);
         OccupantSignalProbe.LoopbackServer srv = new OccupantSignalProbe.LoopbackServer(probe, 0);
         srv.start();
         try {
             int port = srv.getLocalPort();
             OccupantSignalProbe.LoopbackClient cli = new OccupantSignalProbe.LoopbackClient(
-                    port, new OccupantSignalProbe(mockSrc, "fallback"));
+                    port, new OccupantSignalProbe(mockSrc));
             check("loopback pingDaemon succeeds", true, cli.pingDaemon());
             OccupantSignalProbe.PassengerPresence loopOcc = cli.queryPassengerPresence();
             check("loopback OCCUPANCY query reports available & occupied",
@@ -335,50 +240,17 @@ public final class ComfortPolicyTest {
                     loopOcc.available + "/" + loopOcc.occupied + "/"
                             + loopOcc.hscanOccupancy + "/" + loopOcc.sysClassStatus + "/" + loopOcc.asstBelt);
             OccupantSignalProbe.CabinState loopCabin = cli.queryCabinState();
-            check("loopback CABIN_STATE query reports push temp, wheel, ign, avAwake & mobisSleeping",
-                    "33.5/0.8/0/1/1/1/0/false",
+            check("loopback CABIN_STATE query reports push temp, wheel, ign, avAwake, mobisSleeping & seatCaps",
+                    "33.5/0.8/0/1/1/1/0/false/vent=0,rl=0,rr=0",
                     loopCabin.outsideTempF + "/" + loopCabin.outsideTempC + "/" + loopCabin.wheelHeat
                             + "/" + loopCabin.ignOn + "/" + loopCabin.ign3On
                             + "/" + loopCabin.avAwake + "/" + loopCabin.mobisSleeping
-                            + "/" + loopCabin.datcSentinel);
+                            + "/" + loopCabin.datcSentinel + "/" + loopCabin.seatCaps.summary());
             cli.notifyWake();
             check("loopback WAKE triggers source.onWake()", 1, wakeCount[0]);
-            OccupantSignalProbe.UiState uiState = cli.pollUi(false, "hv.ready=1");
-            check("loopback pollUi returns UID 1000 banner", true,
-                    uiState.sourceBanner.startsWith("UID 1000 test"));
-            check("loopback pollUi preserves 2 changed signals", 2, uiState.changedCount);
-
-            File tmpRoot = Files.createTempDirectory("comfort-usb-test").toFile();
-            try {
-                File usb0 = new File(tmpRoot, "usb0");
-                usb0.mkdirs();
-                ComfortUsbExporter.ExportResult exp = cli.exportToUsb(
-                        Collections.singletonList(new File(usb0, "ComfortProbe").getAbsolutePath()),
-                        "hv.ready=1");
-                check("loopback exportToUsb succeeds to USB folder", true, exp.ok);
-                check("exported file exists under ComfortProbe/", true,
-                        exp.reportPath != null
-                                && exp.reportPath.contains("/ComfortProbe/occupant-probe-")
-                                && new File(exp.reportPath).isFile());
-            } finally {
-                deleteTree(tmpRoot);
-            }
         } finally {
             srv.stop();
         }
-
-        // 14. ComfortUsbExporter /proc/mounts parser rejects internal flash & accepts vfat/exfat USB
-        String sampleMounts =
-                "rootfs / rootfs ro 0 0\n"
-                + "/dev/block/mmcblk0p25 /system ext4 ro 0 0\n"
-                + "/dev/block/mmcblk0p28 /data ext4 rw 0 0\n"
-                + "tmpfs /mnt/media_rw tmpfs rw 0 0\n"
-                + "/dev/fuse /storage/emulated/0 fuse rw 0 0\n"
-                + "/dev/block/vold/8:1 /mnt/media_rw/usb0 exfat rw 0 0\n"
-                + "/dev/fuse /storage/usb0 fuse rw 0 0\n";
-        List<String> mounts = ComfortUsbExporter.parseUsbMountPoints(sampleMounts);
-        check("parseUsbMountPoints orders /storage/usb0 then /mnt/media_rw/usb0 and blocks internal partitions",
-                Arrays.asList("/storage/usb0", "/mnt/media_rw/usb0"), mounts);
 
         // 15. hmgapid MAX_ARGS (16) vehicle batch chunking invariant
         String[] sixteenKeys = {
@@ -495,24 +367,6 @@ public final class ComfortPolicyTest {
         btSeatedStart.onSessionClimateEvaluated(autoPass, seatedUnbuckled);
         check("passenger already seated at startup does not double-fire mid-session", false,
                 btSeatedStart.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedBuckled));
-
-        // 19. Refined Signal Inspector candidate & noisy-counter filters from Ioniq 5 capture
-        check("candidate matches HSCAN.getAsstStBltSwSta", true,
-                OccupantSignalProbe.isOccupantCandidate("HSCAN.getAsstStBltSwSta"));
-        check("candidate matches SYS.getClassStatus", true,
-                OccupantSignalProbe.isOccupantCandidate("SYS.getClassStatus"));
-        check("candidate matches BCM.getAstSeatBelt", true,
-                OccupantSignalProbe.isOccupantCandidate("BCM.getAstSeatBelt"));
-        check("candidate ignores RADIO.getLastAMFrequency (not 'ast')", false,
-                OccupantSignalProbe.isOccupantCandidate("RADIO.getLastAMFrequency"));
-        check("candidate ignores HEV.getLastDepartTime (not 'ast')", false,
-                OccupantSignalProbe.isOccupantCandidate("HEV.getLastDepartTime"));
-        check("noisy filter catches SXM65H.getTime", true,
-                OccupantSignalProbe.isNoisyCounter("SXM65H.getTime"));
-        check("noisy filter catches HSCAN.getSpeedDistKM", true,
-                OccupantSignalProbe.isNoisyCounter("HSCAN.getSpeedDistKM"));
-        check("noisy filter catches HEVFlag.DATC_CLMTPWRCNSMPTN_W", true,
-                OccupantSignalProbe.isNoisyCounter("HEVFlag.DATC_CLMTPWRCNSMPTN_W"));
 
         // 20. QuickBoot plugged-in charging: CabinState push fallback, DisplayOff vs BlackScreen, and ACC -> Ignition ON
         check("DisplayOff sets avAwake=0 without mobisSleeping=1", "0/0",
@@ -683,16 +537,5 @@ public final class ComfortPolicyTest {
                 "69/74", gapDown.heatLowF + "/" + gapDown.ventLowF);
 
         System.exit(fail);
-    }
-
-    private static void deleteTree(File f) {
-        if (f == null || !f.exists()) return;
-        File[] kids = f.listFiles();
-        if (kids != null) {
-            for (int i = 0; i < kids.length; i++) {
-                deleteTree(kids[i]);
-            }
-        }
-        f.delete();
     }
 }

@@ -207,16 +207,15 @@ public final class WelcomeDaemon {
 
     private static void startProbeServer() {
         OccupantSignalProbe probe = new OccupantSignalProbe(
-                new OccupantSignalProbe.ReflectionGen5wSignalSource(new CabinPushBridge()),
-                "UID 1000 daemon");
+                new OccupantSignalProbe.ReflectionGen5wSignalSource(new CabinPushBridge()));
         activeProbe = probe;
         try {
             OccupantSignalProbe.LoopbackServer srv =
                     new OccupantSignalProbe.LoopbackServer(probe, OccupantSignalProbe.DEFAULT_PORT);
             srv.start();
-            log("occupant signal probe listening on 127.0.0.1:" + OccupantSignalProbe.DEFAULT_PORT);
+            log("cabin telemetry bridge listening on 127.0.0.1:" + OccupantSignalProbe.DEFAULT_PORT);
         } catch (Throwable t) {
-            log("occupant signal probe server unavailable: " + t);
+            log("cabin telemetry bridge unavailable: " + t);
         }
     }
 

@@ -22,24 +22,18 @@ import android.widget.Toast;
 
 import hmgapi.client.HmgApi;
 
-import java.util.Collections;
-import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Material Design 3 widescreen automotive interface for Comfort & Startup (1920x720 Gen5W):
- * - Left M3 Navigation & Live Telemetry Rail (ambient temp, active zone chip, powertrain status, 4 destinations)
- * - Right contextual pane (Overview & Startup, Climate & Seats, Temperature Thresholds, Signal Inspector)
+ * - Left M3 Navigation & Live Telemetry Rail (brand + author credit, ambient temp, HMG-API connection pill, powertrain status, 3 destinations)
+ * - Right contextual pane (Overview & Startup, Climate & Seats, Temperature Thresholds)
  * - Automatic Day/Night M3 tonal palette via UiModeManager
  */
 public final class MainActivity extends Activity implements ComfortEngine.Listener {
     private static final int TAB_OVERVIEW = 0;
     private static final int TAB_CLIMATE = 1;
     private static final int TAB_THRESHOLDS = 2;
-    private static final int TAB_INSPECTOR = 3;
-
-    private static final long PROBE_POLL_INTERVAL_MS = 1500L;
 
     private static final String[][] POLICY_OPTIONS = {
         { ComfortConfig.POLICY_OFF, "Off" },
@@ -53,7 +47,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private ComfortEngine engine;
     private ComfortConfig current = ComfortConfig.defaults();
     private float latestAmbientF = Float.NaN;
-    private volatile Map<String, String> latestReadings;
     private OccupantSignalProbe.PassengerPresence latestPresence =
             OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
     private OccupantSignalProbe.CabinState latestCabin =
@@ -62,22 +55,21 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             OccupantSignalProbe.SeatCapabilities.UNKNOWN;
 
     // Left rail & navigation views
-    private TextView lblConnSub;
     private TextView lblAmbientTemp;
     private TextView lblAmbientSub;
-    private TextView lblZoneChip;
+    private TextView lblConnChip;
     private TextView chipEv;
     private TextView chipGear;
     private TextView chipWheel;
-    private final LinearLayout[] navItems = new LinearLayout[4];
-    private final ComfortIcons[] navIcons = new ComfortIcons[4];
-    private final TextView[] navLabels = new TextView[4];
+    private final LinearLayout[] navItems = new LinearLayout[3];
+    private final ComfortIcons[] navIcons = new ComfortIcons[3];
+    private final TextView[] navLabels = new TextView[3];
 
     // Right pane header & pages
     private TextView pageTitle;
     private TextView pageSubtitle;
-    private final View[] headerActions = new View[4];
-    private final View[] pages = new View[4];
+    private final View[] headerActions = new View[3];
+    private final View[] pages = new View[3];
     private TextView lblClimateSummaryChip;
 
     // Overview & Startup controls
@@ -128,33 +120,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private TextView lblVentMed;
     private TextView lblVentHigh;
 
-    // Signal Inspector controls & background loopback client
-    private final OccupantSignalProbe.LoopbackClient probeClient =
-            new OccupantSignalProbe.LoopbackClient(OccupantSignalProbe.DEFAULT_PORT, null);
-    private final AtomicBoolean probeBusy = new AtomicBoolean(false);
-    private volatile boolean probeDaemonBootstrapped;
-    private boolean probeNeedsInitialFullScan = true;
-    private boolean activityResumed;
-    private TextView lblProbeSource;
-    private TextView lblProbeBaseline;
-    private TextView lblProbeDiffChip;
-    private TextView lblProbeExportBanner;
-    private TextView txtProbeChanges;
-    private TextView txtProbeCandidates;
-
-    private final Runnable probeTickRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (!activityResumed || isFinishing() || activeTab != TAB_INSPECTOR) {
-                return;
-            }
-            boolean full = probeNeedsInitialFullScan;
-            probeNeedsInitialFullScan = false;
-            triggerProbePoll(full, false);
-            ui.postDelayed(this, PROBE_POLL_INTERVAL_MS);
-        }
-    };
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         ComfortTheme.apply(this);
@@ -177,19 +142,15 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     @Override
     protected void onResume() {
         super.onResume();
-        activityResumed = true;
         if (engine != null) {
             engine.setUiForeground(true);
             engine.addListener(this);
             engine.requestSettingsReload();
         }
-        scheduleProbeIfVisible(0L);
     }
 
     @Override
     protected void onPause() {
-        activityResumed = false;
-        ui.removeCallbacks(probeTickRunnable);
         if (engine != null) {
             engine.setUiForeground(false);
             engine.removeListener(this);
@@ -226,7 +187,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         pages[TAB_OVERVIEW] = wrapScroll(buildOverviewPage());
         pages[TAB_CLIMATE] = wrapScroll(buildClimatePage());
         pages[TAB_THRESHOLDS] = wrapScroll(buildThresholdsPage());
-        pages[TAB_INSPECTOR] = wrapScroll(buildInspectorPage());
         for (int i = 0; i < pages.length; i++) {
             stage.addView(pages[i], new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -258,7 +218,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         int p = d(14);
         rail.setPadding(p, d(12), p, d(12));
 
-        // 1. App brand row + Close button
+        // 1. App brand row + author credit + Close button
         LinearLayout brandRow = new LinearLayout(this);
         brandRow.setOrientation(LinearLayout.HORIZONTAL);
         brandRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -271,9 +231,9 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         titleCol.setOrientation(LinearLayout.VERTICAL);
         titleCol.setPadding(d(10), 0, d(8), 0);
         TextView appTitle = label("Comfort", 18.5f, ON_SURFACE, true);
-        lblConnSub = label("Connecting to HMG-API…", 11.5f, ON_SURFACE_VAR, false);
+        TextView lblAuthor = label("by lemoyneiv", 11.5f, ON_SURFACE_VAR, false);
         titleCol.addView(appTitle);
-        titleCol.addView(lblConnSub);
+        titleCol.addView(lblAuthor);
         brandRow.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         FrameLayout closeBtn = ComfortWidgets.circleIconButton(
@@ -287,7 +247,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         brandRow.addView(closeBtn);
         rail.addView(brandRow);
 
-        // 2. Live ambient & powertrain telemetry card
+        // 2. Live ambient, HMG-API connection & powertrain telemetry card
         LinearLayout teleCard = new LinearLayout(this);
         teleCard.setOrientation(LinearLayout.VERTICAL);
         teleCard.setBackground(shape(SURFACE_CONT, OUTLINE_VAR, Math.max(1, d(1)), d(18)));
@@ -301,17 +261,21 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         tempRow.setGravity(Gravity.CENTER_VERTICAL);
 
         lblAmbientTemp = label("--°F", 26f, ON_SURFACE, true);
+        lblAmbientTemp.setSingleLine(true);
         tempRow.addView(lblAmbientTemp);
 
         lblAmbientSub = label("", 12.5f, ON_SURFACE_VAR, false);
+        lblAmbientSub.setSingleLine(true);
         lblAmbientSub.setPadding(d(6), d(4), 0, 0);
         tempRow.addView(lblAmbientSub);
 
         View tempSpacer = new View(this);
         tempRow.addView(tempSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
 
-        lblZoneChip = statusChip("Standby", SURFACE_HIGH, ON_SURFACE_VAR);
-        tempRow.addView(lblZoneChip);
+        lblConnChip = statusChip("Waiting · HMG-API", SURFACE_HIGH, ON_SURFACE_VAR);
+        lblConnChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        lblConnChip.setPadding(d(8), d(4), d(8), d(4));
+        tempRow.addView(lblConnChip);
         teleCard.addView(tempRow);
 
         LinearLayout chipsRow = new LinearLayout(this);
@@ -330,17 +294,16 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         teleCard.addView(chipsRow, crLp);
         rail.addView(teleCard, teleLp);
 
-        // 3. M3 Navigation Rail destination pills (42dp height fits all 4 tabs across 160-240 dpi)
+        // 3. M3 Navigation Rail destination pills
         LinearLayout navCol = new LinearLayout(this);
         navCol.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams navColLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        navColLp.topMargin = d(10);
+        navColLp.topMargin = d(12);
 
         navCol.addView(buildNavItem(TAB_OVERVIEW, ComfortIcons.SHIELD_CHECK, "Overview & Startup"));
         navCol.addView(buildNavItem(TAB_CLIMATE, ComfortIcons.SEAT_WAVE, "Climate & Seats"));
         navCol.addView(buildNavItem(TAB_THRESHOLDS, ComfortIcons.THERMOMETER, "Thresholds"));
-        navCol.addView(buildNavItem(TAB_INSPECTOR, ComfortIcons.RADAR, "Signal Inspector"));
         rail.addView(navCol, navColLp);
 
         rail.addView(new View(this), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -366,7 +329,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(d(42));
+        row.setMinimumHeight(d(44));
         row.setPadding(d(16), 0, d(16), 0);
         row.setClickable(true);
 
@@ -392,8 +355,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         navLabels[index] = lbl;
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, d(42));
-        if (index > 0) lp.topMargin = d(3);
+                ViewGroup.LayoutParams.MATCH_PARENT, d(44));
+        if (index > 0) lp.topMargin = d(4);
         row.setLayoutParams(lp);
         return row;
     }
@@ -443,49 +406,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         headerActions[TAB_THRESHOLDS] = resetBtn;
         bar.addView(resetBtn);
 
-        // Contextual actions for Tab 3 (Signal Inspector)
-        LinearLayout actInspector = new LinearLayout(this);
-        actInspector.setOrientation(LinearLayout.HORIZONTAL);
-        actInspector.setGravity(Gravity.CENTER_VERTICAL);
-
-        LinearLayout markBtn = ComfortWidgets.m3Button(
-                this, ComfortIcons.RADAR, "Mark Baseline", ComfortWidgets.BTN_FILLED, 36,
-                new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        triggerProbeBaseline();
-                    }
-                });
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        mlp.rightMargin = d(8);
-        actInspector.addView(markBtn, mlp);
-
-        LinearLayout scanBtn = ComfortWidgets.m3Button(
-                this, ComfortIcons.RESET, "Full Scan", ComfortWidgets.BTN_OUTLINED, 36,
-                new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        triggerProbePoll(true, true);
-                    }
-                });
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.rightMargin = d(8);
-        actInspector.addView(scanBtn, slp);
-
-        LinearLayout exportBtn = ComfortWidgets.m3Button(
-                this, ComfortIcons.USB_EXPORT, "Export USB", ComfortWidgets.BTN_TONAL, 36,
-                new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        triggerProbeUsbExport();
-                    }
-                });
-        actInspector.addView(exportBtn);
-        headerActions[TAB_INSPECTOR] = actInspector;
-        bar.addView(actInspector);
-
         return bar;
     }
 
@@ -499,17 +419,12 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                 headerActions[i].setVisibility(sel ? View.VISIBLE : View.GONE);
             }
             navItems[i].setBackground(interactiveShape(
-                    sel ? SECONDARY_CONT : Color.TRANSPARENT, 0, 0, d(21), STATE_ON_SURFACE));
+                    sel ? SECONDARY_CONT : Color.TRANSPARENT, 0, 0, d(22), STATE_ON_SURFACE));
             navIcons[i].setColor(sel ? ON_SECONDARY_CONT : ON_SURFACE_VAR);
             navLabels[i].setTextColor(sel ? ON_SECONDARY_CONT : ON_SURFACE_VAR);
             navLabels[i].setTypeface(sel ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         }
         updateHeaderText();
-        if (index == TAB_INSPECTOR) {
-            scheduleProbeIfVisible(0L);
-        } else {
-            ui.removeCallbacks(probeTickRunnable);
-        }
     }
 
     private void updateHeaderText() {
@@ -523,14 +438,11 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             pageSubtitle.setText(ventOk
                     ? "Automatic heating, summer ventilation, and companion seat policies on start or charging"
                     : "Automatic seat & wheel heating and companion seat policies on start or charging");
-        } else if (activeTab == TAB_THRESHOLDS) {
+        } else {
             pageTitle.setText("Temperature Thresholds");
             pageSubtitle.setText(ventOk
                     ? "Outside temperature triggers (°F) for multi-stage heating and ventilation"
                     : "Outside temperature triggers (°F) for multi-stage winter seat and wheel heating");
-        } else {
-            pageTitle.setText("Signal Inspector");
-            pageSubtitle.setText("Read-only Gen5W occupant, seatbelt, door & ROA discovery (privacy-filtered)");
         }
     }
 
@@ -1016,267 +928,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         return box;
     }
 
-    // ---- Page 3: Signal Inspector (Read-Only Gen5W Cabin Probe) ----
-
-    private View buildInspectorPage() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        // Top status & walk-around instructions banner card
-        LinearLayout topCard = m3Card();
-        LinearLayout headRow = new LinearLayout(this);
-        headRow.setOrientation(LinearLayout.HORIZONTAL);
-        headRow.setGravity(Gravity.CENTER_VERTICAL);
-        headRow.addView(ComfortWidgets.iconBadge(
-                this, ComfortIcons.RADAR, PRIMARY_CONT, ON_PRIMARY_CONT, 36, 19));
-
-        LinearLayout statusCol = new LinearLayout(this);
-        statusCol.setOrientation(LinearLayout.VERTICAL);
-        statusCol.setPadding(d(10), 0, d(10), 0);
-        lblProbeSource = label("Connecting to UID-1000 signal probe…", 14f, ON_SURFACE, true);
-        lblProbeBaseline = label(
-                "1) Sit in driver seat & tap Mark Baseline  ·  2) Sit in passenger seat / buckle belt / open door  ·  3) Tap Export USB",
-                12f, ON_SURFACE_VAR, false);
-        statusCol.addView(lblProbeSource);
-        statusCol.addView(lblProbeBaseline);
-        headRow.addView(statusCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        lblProbeDiffChip = statusChip("0 Diffs", SURFACE_HIGH, ON_SURFACE_VAR);
-        lblProbeDiffChip.setPadding(d(12), d(6), d(12), d(6));
-        headRow.addView(lblProbeDiffChip);
-        topCard.addView(headRow);
-
-        lblProbeExportBanner = label("", 12f, OK, true);
-        lblProbeExportBanner.setVisibility(View.GONE);
-        LinearLayout.LayoutParams expLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        expLp.topMargin = d(8);
-        topCard.addView(lblProbeExportBanner, expLp);
-        col.addView(topCard);
-
-        // Two-column split: Changes Since Baseline | Candidate Getters
-        LinearLayout split = new LinearLayout(this);
-        split.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams splitLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        splitLp.topMargin = d(10);
-
-        LinearLayout diffCard = m3Card();
-        diffCard.addView(cardHeader(
-                ComfortIcons.PLAY_BOLT, SECONDARY_CONT, ON_SECONDARY_CONT,
-                "Changes Since Baseline", "Live [ACTIVE] diffs & walk-around [TOGGLED] history"));
-        txtProbeChanges = monoConsoleView(
-                "  (tap Mark Baseline, then open passenger door / sit / buckle seatbelt…)");
-        diffCard.addView(txtProbeChanges);
-
-        LinearLayout candCard = m3Card();
-        candCard.addView(cardHeader(
-                ComfortIcons.SEAT_WAVE, TERTIARY_CONT, ON_TERTIARY_CONT,
-                "Candidate Signals", "HMG-API & OEM seat / belt / door / ROA getters"));
-        txtProbeCandidates = monoConsoleView("  (scanning Gen5W services…)");
-        candCard.addView(txtProbeCandidates);
-
-        split.addView(diffCard, colWeight(0, 6));
-        split.addView(candCard, colWeight(6, 0));
-        col.addView(split, splitLp);
-        return col;
-    }
-
-    private TextView monoConsoleView(String initialText) {
-        TextView tv = new TextView(this);
-        tv.setText(initialText);
-        tv.setTextColor(ON_SURFACE);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setBackground(shape(SURFACE_LOW, OUTLINE_VAR, Math.max(1, d(1)), d(12)));
-        tv.setPadding(d(10), d(8), d(10), d(8));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = d(10);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private void scheduleProbeIfVisible(long delayMs) {
-        ui.removeCallbacks(probeTickRunnable);
-        if (activityResumed && !isFinishing() && activeTab == TAB_INSPECTOR) {
-            if (delayMs <= 0L) {
-                ui.post(probeTickRunnable);
-            } else {
-                ui.postDelayed(probeTickRunnable, delayMs);
-            }
-        }
-    }
-
-    private void ensureProbeDaemonOnce() {
-        if (probeDaemonBootstrapped) {
-            return;
-        }
-        probeDaemonBootstrapped = true;
-        if (!probeClient.pingDaemon()) {
-            try {
-                HmgApi.connect().timeout(2500).restartService("welcome");
-                Thread.sleep(350L);
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
-    private void triggerProbePoll(final boolean fullScan, final boolean manualToast) {
-        if (!probeBusy.compareAndSet(false, true)) {
-            return;
-        }
-        final String hmgSum = buildHmgProbeSummary();
-        Thread t = new Thread("ComfortProbePoll") {
-            @Override
-            public void run() {
-                try {
-                    ensureProbeDaemonOnce();
-                    final OccupantSignalProbe.UiState state = probeClient.pollUi(fullScan, hmgSum);
-                    ui.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (!isFinishing()) {
-                                renderProbeUi(state);
-                                if (manualToast) {
-                                    Toast.makeText(
-                                            MainActivity.this,
-                                            "Full scan complete (" + state.changedCount + " changed)",
-                                            Toast.LENGTH_SHORT).show();
-                                }
-                            }
-                        }
-                    });
-                } finally {
-                    probeBusy.set(false);
-                }
-            }
-        };
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private void triggerProbeBaseline() {
-        final String hmgSum = buildHmgProbeSummary();
-        Thread t = new Thread("ComfortProbeBaseline") {
-            @Override
-            public void run() {
-                probeBusy.set(true);
-                try {
-                    ensureProbeDaemonOnce();
-                    final OccupantSignalProbe.UiState state =
-                            probeClient.markBaseline("Cabin test", hmgSum);
-                    ui.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (!isFinishing()) {
-                                renderProbeUi(state);
-                                Toast.makeText(
-                                        MainActivity.this,
-                                        "Baseline marked! 1s walk-around capture active for 10 min.",
-                                        Toast.LENGTH_LONG).show();
-                            }
-                        }
-                    });
-                } finally {
-                    probeBusy.set(false);
-                }
-            }
-        };
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private void triggerProbeUsbExport() {
-        final String hmgSum = buildHmgProbeSummary();
-        Toast.makeText(this, "Exporting signal report to USB…", Toast.LENGTH_SHORT).show();
-        Thread t = new Thread("ComfortProbeExport") {
-            @Override
-            public void run() {
-                probeBusy.set(true);
-                try {
-                    ensureProbeDaemonOnce();
-                    List<String> usbFolders = Collections.emptyList();
-                    try {
-                        usbFolders = HmgApi.connect().timeout(2000).usbFolders();
-                    } catch (Throwable ignored) {
-                    }
-                    final ComfortUsbExporter.ExportResult res =
-                            probeClient.exportToUsb(usbFolders, hmgSum);
-                    final OccupantSignalProbe.UiState refreshed =
-                            probeClient.pollUi(false, hmgSum);
-                    ui.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (isFinishing()) return;
-                            renderProbeUi(refreshed);
-                            if (lblProbeExportBanner != null) {
-                                lblProbeExportBanner.setVisibility(View.VISIBLE);
-                                if (res.ok) {
-                                    lblProbeExportBanner.setTextColor(OK);
-                                    lblProbeExportBanner.setText("Saved USB report: " + res.reportPath);
-                                    Toast.makeText(
-                                            MainActivity.this,
-                                            "Saved: " + res.reportPath,
-                                            Toast.LENGTH_LONG).show();
-                                } else {
-                                    lblProbeExportBanner.setTextColor(ON_SURFACE_VAR);
-                                    lblProbeExportBanner.setText("USB export: " + res.errorMessage);
-                                    Toast.makeText(
-                                            MainActivity.this,
-                                            res.errorMessage != null ? res.errorMessage : "USB export failed",
-                                            Toast.LENGTH_LONG).show();
-                                }
-                            }
-                        }
-                    });
-                } finally {
-                    probeBusy.set(false);
-                }
-            }
-        };
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private void renderProbeUi(OccupantSignalProbe.UiState state) {
-        if (state == null || lblProbeSource == null) {
-            return;
-        }
-        lblProbeSource.setText(state.sourceBanner);
-        lblProbeBaseline.setText(state.baselineSummary
-                + "  ·  Open door / sit in passenger seat / buckle belt, then tap Export USB");
-        if (state.changedCount > 0) {
-            styleChip(lblProbeDiffChip, state.changedCount + " Changed", OK_CONT, ON_OK_CONT);
-        } else {
-            styleChip(lblProbeDiffChip, "0 Diffs", SURFACE_HIGH, ON_SURFACE_VAR);
-        }
-        txtProbeChanges.setText(state.changesText);
-        txtProbeCandidates.setText(state.candidatesText);
-    }
-
-    private String buildHmgProbeSummary() {
-        Map<String, String> r = latestReadings;
-        if (r == null || r.isEmpty()) {
-            return "waiting for HMG-API readings (" + latestPresence.summary()
-                    + " · " + latestCabin.summary() + ")";
-        }
-        return "hv.ready=" + val(r, "hv.ready")
-                + " gear.park=" + val(r, "gear.park")
-                + " charging=" + val(r, "charging")
-                + " temp_f=" + val(r, "outside_temp_f")
-                + " cabin=[" + latestCabin.summary() + "]"
-                + " pass_occ=[" + latestPresence.summary() + "]"
-                + " seat_state[drv=" + val(r, "seat_state.driver")
-                + ", psg=" + val(r, "seat_state.passenger")
-                + ", rl=" + val(r, "seat_state.rear_left")
-                + ", rr=" + val(r, "seat_state.rear_right") + "]"
-                + " seat_heat[drv=" + val(r, "seat_heat.driver")
-                + ", psg=" + val(r, "seat_heat.passenger")
-                + ", rl=" + val(r, "seat_heat.rear_left")
-                + ", rr=" + val(r, "seat_heat.rear_right") + "]";
-    }
-
     // ---- Mutations & Live Rendering ----
 
     private void adjustDelay(int deltaMs) {
@@ -1375,7 +1026,6 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private void render(ComfortEngine.Snapshot s) {
         current = s.config;
         Map<String, String> r = s.readings;
-        latestReadings = r;
         latestPresence = s.passengerPresence == null
                 ? OccupantSignalProbe.PassengerPresence.UNAVAILABLE
                 : s.passengerPresence;
@@ -1391,36 +1041,22 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         }
         boolean ventSupported = latestCaps.isFrontVentSupported();
 
-        // Connection status
-        lblConnSub.setText(s.connected ? "Connected · HMG-API" : "Waiting for HMG-API…");
-        lblConnSub.setTextColor(s.connected ? OK : ON_SURFACE_VAR);
+        // HMG-API connection status pill
+        if (s.connected) {
+            styleChip(lblConnChip, "Connected · HMG-API", OK_CONT, ON_OK_CONT);
+        } else {
+            styleChip(lblConnChip, "Waiting · HMG-API", SURFACE_HIGH, ON_SURFACE_VAR);
+        }
 
-        // Ambient temperature & active comfort zone chip
+        // Ambient temperature
         latestAmbientF = ComfortPolicy.parseAmbientF(r == null ? null : r.get("outside_temp_f"));
         if (!Float.isNaN(latestAmbientF)) {
             lblAmbientTemp.setText(Math.round(latestAmbientF) + "°F");
             String cRaw = val(r, "outside_temp");
             lblAmbientSub.setText("-".equals(cRaw) ? "" : cRaw + "°C");
-            if (current.climateEnabled && latestAmbientF <= current.heatLowF) {
-                styleChip(lblZoneChip, "Winter Heat", PRIMARY_CONT, ON_PRIMARY_CONT);
-            } else if (current.climateEnabled && current.ventEnabled && ventSupported
-                    && latestAmbientF >= current.ventLowF) {
-                styleChip(lblZoneChip, "Summer Vent", TERTIARY_CONT, ON_TERTIARY_CONT);
-            } else {
-                styleChip(lblZoneChip, "Comfort Zone", SURFACE_HIGH, ON_SURFACE_VAR);
-            }
         } else {
             lblAmbientTemp.setText("--°F");
             lblAmbientSub.setText("");
-            boolean accNoIgn = s.connected
-                    && latestCabin.ignOn == 0
-                    && (r == null || !"1".equals(r.get("hv.ready")))
-                    && !ComfortPolicy.isBcmSeatClimateReady(r);
-            if (accNoIgn) {
-                styleChip(lblZoneChip, "ACC · Off", TERTIARY_CONT, ON_TERTIARY_CONT);
-            } else {
-                styleChip(lblZoneChip, s.connected ? "No Temp" : "Offline", SURFACE_HIGH, ON_SURFACE_VAR);
-            }
         }
 
         // Powertrain & wheel chips

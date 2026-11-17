@@ -25,7 +25,7 @@ has "apk contains ComfortWidgets" "Ldev/lemoyne/comfort/ComfortWidgets;" "$DEX_S
 has "apk contains BootReceiver" "Ldev/lemoyne/comfort/BootReceiver;" "$DEX_STRINGS"
 has "apk contains OccupantSignalProbe" "Ldev/lemoyne/comfort/OccupantSignalProbe;" "$DEX_STRINGS"
 has "apk contains CabinPushBridge" "Ldev/lemoyne/comfort/CabinPushBridge;" "$DEX_STRINGS"
-has "apk contains ComfortUsbExporter" "Ldev/lemoyne/comfort/ComfortUsbExporter;" "$DEX_STRINGS"
+check "apk omits removed ComfortUsbExporter" no "$(echo "$DEX_STRINGS" | grep -q 'Ldev/lemoyne/comfort/ComfortUsbExporter;' && echo yes || echo no)"
 has "apk bundles HmgApi client" "Lhmgapi/client/HmgApi;" "$DEX_STRINGS"
 
 for ic in icon.png icon_night.png icon_disabled.png icon_disabled_night.png; do
@@ -51,7 +51,7 @@ eng apply
 check "engine apply succeeds" 0 "$rc"
 has "mod published as on" "1 of 1 mods on" "$out"
 has "mod in public state.json" '"hmgapi-comfort"' "$(cat "$R/data/hmgapi/public/state.json")"
-has "ComfortProbe USB folder registered in usb.txt" "hmgapi-comfort ComfortProbe" "$(cat "$R/data/hmgapi/state/usb.txt")"
+check "no ComfortProbe USB folder registered in usb.txt" no "$(grep -q 'ComfortProbe' "$R/data/hmgapi/state/usb.txt" 2>/dev/null && echo yes || echo no)"
 has "welcome daemon registered in services.txt at boot" "hmgapi-comfort welcome system boot yes jar app/Comfort.apk dev.lemoyne.comfort.WelcomeDaemon" "$(cat "$R/data/hmgapi/state/services.txt")"
 has "starter registered in services.txt as system" "hmgapi-comfort starter system android no script svc/start.sh -" "$(cat "$R/data/hmgapi/state/services.txt")"
 for cmd in startup_notice seat_heat seat_vent wheel_heat; do

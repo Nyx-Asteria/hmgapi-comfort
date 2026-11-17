@@ -31,7 +31,6 @@ final class ComfortIcons extends Drawable {
     static final int RESET = 15;
     static final int AUTO_CLIMATE = 16;
     static final int RADAR = 17;
-    static final int USB_EXPORT = 18;
 
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -259,21 +258,6 @@ final class ComfortIcons extends Drawable {
                 c.drawLine(12f * s, 12f * s, 17.8f * s, 6.2f * s, p);
                 p.setStyle(Paint.Style.FILL);
                 c.drawCircle(12f * s, 12f * s, 1.9f * s, p);
-                break;
-            }
-            case USB_EXPORT: {
-                path.moveTo(4.5f * s, 14.8f * s);
-                path.lineTo(4.5f * s, 19.5f * s);
-                path.lineTo(19.5f * s, 19.5f * s);
-                path.lineTo(19.5f * s, 14.8f * s);
-                c.drawPath(path, p);
-
-                c.drawLine(12f * s, 4.0f * s, 12f * s, 14.5f * s, p);
-                path.reset();
-                path.moveTo(8.2f * s, 10.8f * s);
-                path.lineTo(12f * s, 14.6f * s);
-                path.lineTo(15.8f * s, 10.8f * s);
-                c.drawPath(path, p);
                 break;
             }
         }

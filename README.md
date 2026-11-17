@@ -27,9 +27,6 @@ Automatically dismisses the infotainment startup confirmation screen across cold
 - **Material Design 3 Widescreen Dashboard (`1920×720`)**
   - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live cabin seat preview tiles, a seasonal comfort spectrum bar with live outside temperature pin, one-tap **Run Climate Check** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.
   - Zero `/system` file modifications and zero firmware-specific hook points—removing or disabling the mod leaves the head unit 100% stock.
-- **Built-In Cabin Signal Inspector (`Signal Inspector` Tab + USB Export)**
-  - Read-only, privacy-filtered Gen5W OEM service inspector (`BCM`, `HSCAN`, `SYS`, `USM`, `CLU`, `DATC`, `HEV` + `HEVFlag`, `VR`, `PGS`, `REG`) for discovering front-passenger/rear seat occupancy, seatbelt buckle, door open/close, and Rear Occupant Alert (`ROA`) getters across Hyundai/Kia/Genesis models.
-  - Supports one-tap **Mark Baseline** (with a 10-minute `1 s` walk-around transition recorder that retains both `[ACTIVE]` diffs and `[TOGGLED]` `0 -> 1 -> 0` transitions) and atomic **Export USB** to `<usb>/ComfortProbe/occupant-probe-<timestamp>.txt`. Never invokes mutators or reads `String`/VIN/serial/GPS/phone/account identifiers.
 
 ---
 
