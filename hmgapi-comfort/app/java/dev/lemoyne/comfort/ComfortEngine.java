@@ -26,7 +26,7 @@ import java.util.Map;
  */
 public final class ComfortEngine {
     private static final String TAG = "HmgComfort";
-    private static final String[] READ_KEYS = {
+    static final String[] READ_KEYS = {
         "hv.ready", "gear.park", "charging", "outside_temp_f", "outside_temp", "wheel_heat",
         "seat_heat.driver", "seat_heat.passenger", "seat_heat.rear_left", "seat_heat.rear_right",
         "seat_vent.driver", "seat_vent.passenger",
@@ -40,14 +40,23 @@ public final class ComfortEngine {
     public static final class Snapshot {
         public final ComfortConfig config;
         public final Map<String, String> readings;
+        public final OccupantSignalProbe.PassengerPresence passengerPresence;
         public final String lastClimateStatus;
         public final String lastWelcomeStatus;
         public final boolean connected;
 
-        Snapshot(ComfortConfig config, Map<String, String> readings,
-                 String lastClimateStatus, String lastWelcomeStatus, boolean connected) {
+        Snapshot(
+                ComfortConfig config,
+                Map<String, String> readings,
+                OccupantSignalProbe.PassengerPresence passengerPresence,
+                String lastClimateStatus,
+                String lastWelcomeStatus,
+                boolean connected) {
             this.config = config;
             this.readings = readings;
+            this.passengerPresence = passengerPresence == null
+                    ? OccupantSignalProbe.PassengerPresence.UNAVAILABLE
+                    : passengerPresence;
             this.lastClimateStatus = lastClimateStatus;
             this.lastWelcomeStatus = lastWelcomeStatus;
             this.connected = connected;
@@ -61,6 +70,46 @@ public final class ComfortEngine {
             instance = new ComfortEngine(ctx.getApplicationContext());
         }
         return instance;
+    }
+
+    /**
+     * Reads vehicle telemetry in <= 8-key batches so hmgapid's wire MAX_ARGS (16) is never exceeded,
+     * falling back per-key if an older HMG-API runtime has not declared one of the newer readings.
+     */
+    static Map<String, String> readVehicleReadings(HmgApi api, String[] keys) throws IOException {
+        Map<String, String> merged = new LinkedHashMap<String, String>();
+        List<String[]> batches = ComfortPolicy.chunkVehicleKeys(keys, ComfortPolicy.MAX_VEHICLE_BATCH_KEYS);
+        for (int i = 0; i < batches.size(); i++) {
+            String[] batch = batches.get(i);
+            try {
+                Map<String, String> part = api.vehicle(batch);
+                if (part != null) {
+                    merged.putAll(part);
+                }
+            } catch (HmgApi.HmgApiException e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("not declared")) {
+                    for (int k = 0; k < batch.length; k++) {
+                        String key = batch[k];
+                        try {
+                            Map<String, String> single = api.vehicle(key);
+                            String val = single == null ? null : single.get(key);
+                            merged.put(key, val == null ? "-" : val);
+                        } catch (HmgApi.HmgApiException e2) {
+                            String m2 = e2.getMessage() == null ? "" : e2.getMessage();
+                            if (m2.contains("not declared")) {
+                                merged.put(key, "-");
+                            } else {
+                                throw e2;
+                            }
+                        }
+                    }
+                } else {
+                    throw e;
+                }
+            }
+        }
+        return merged;
     }
 
     /**
@@ -83,11 +132,17 @@ public final class ComfortEngine {
     private final Context appContext;
     private final List<Listener> listeners = new ArrayList<Listener>();
     private final ComfortPolicy.DriveTracker driveTracker = new ComfortPolicy.DriveTracker();
+    private final ComfortPolicy.PassengerBoardingTracker boardingTracker =
+            new ComfortPolicy.PassengerBoardingTracker();
     private final ComfortPolicy.WelcomeTracker welcomeTracker =
             new ComfortPolicy.WelcomeTracker(SystemClock.elapsedRealtime());
+    private final OccupantSignalProbe.LoopbackClient occupancyClient =
+            new OccupantSignalProbe.LoopbackClient(OccupantSignalProbe.DEFAULT_PORT, null);
 
     private volatile ComfortConfig config = ComfortConfig.defaults();
     private volatile Map<String, String> lastReadings = new LinkedHashMap<String, String>();
+    private volatile OccupantSignalProbe.PassengerPresence lastPassengerPresence =
+            OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
     private volatile String lastClimateStatus = "Waiting for vehicle start";
     private volatile String lastWelcomeStatus = "Armed for startup";
     private volatile boolean connected;
@@ -143,7 +198,7 @@ public final class ComfortEngine {
 
     public Snapshot snapshot() {
         return new Snapshot(config, new LinkedHashMap<String, String>(lastReadings),
-                lastClimateStatus, lastWelcomeStatus, connected);
+                lastPassengerPresence, lastClimateStatus, lastWelcomeStatus, connected);
     }
 
     public void onScreenOff() {
@@ -165,6 +220,7 @@ public final class ComfortEngine {
     public void onVehiclePowerOff() {
         mobisAwake = false;
         driveTracker.onPowerOff();
+        boardingTracker.reset();
         welcomeTracker.onScreenOff();
         welcomeAttempts = 0;
         outOfParkWelcomeChecks = 0;
@@ -218,6 +274,7 @@ public final class ComfortEngine {
                 if ((lastEngineSleepGap != Long.MIN_VALUE && sleepGap - lastEngineSleepGap >= 3000L)
                         || (lastEngineWakeSeq != Long.MIN_VALUE && wakeSeq > lastEngineWakeSeq)) {
                     mobisAwake = isDisplayOn();
+                    boardingTracker.reset();
                     welcomeAttempts = 0;
                     outOfParkWelcomeChecks = 0;
                     tempTimeoutRetries = 0;
@@ -263,7 +320,7 @@ public final class ComfortEngine {
                     }
                 }
 
-                // 1. Startup safety notice auto-dismiss BEFORE 15-signal vehicle read so IPC latency never delays it
+                // 1. Startup safety notice auto-dismiss BEFORE vehicle telemetry read so IPC latency never delays it
                 if (forceWelcomeRun || (config.welcomeDismiss
                         && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs))) {
                     boolean manual = forceWelcomeRun;
@@ -271,21 +328,32 @@ public final class ComfortEngine {
                     handleWelcome(api, manual);
                 }
 
-                Map<String, String> v = api.vehicle(READ_KEYS);
+                Map<String, String> v = readVehicleReadings(api, READ_KEYS);
                 lastReadings = v;
+
+                OccupantSignalProbe.PassengerPresence presence = occupancyClient.queryPassengerPresence();
+                lastPassengerPresence = presence;
 
                 // 2. Cold/Warm auto-climate on EV Ready or plugged-in/Utility cabin session (or manual test button)
                 boolean manualClimate = forceClimateRun;
                 forceClimateRun = false;
-                if (manualClimate || (config.climateEnabled
-                        && driveTracker.shouldTrigger(v, isScreenInteractive()))) {
+                boolean interactive = isScreenInteractive();
+                boolean startSession = driveTracker.shouldTrigger(v, interactive);
+                if (!driveTracker.isCompleted() && !startSession) {
+                    boardingTracker.reset();
+                }
+
+                if (manualClimate || (config.climateEnabled && startSession)) {
                     runClimateSequence(api, manualClimate);
+                } else if (boardingTracker.shouldTriggerLateBoarding(config, v, interactive, presence)) {
+                    runPassengerBoardingSequence(api, v, presence);
                 }
 
                 notifyListeners();
                 sleepQuietly(config.welcomeDismiss && welcomeTracker.isPending() ? 400 : 2500);
             } catch (Throwable t) {
                 Log.w(TAG, "[hmgapi-comfort] loop error: " + t);
+                notifyListeners();
                 sleepQuietly(1500);
             }
         }
@@ -383,7 +451,7 @@ public final class ComfortEngine {
                 handleWelcome(api, false);
             }
             try {
-                v = api.vehicle(READ_KEYS);
+                v = readVehicleReadings(api, READ_KEYS);
                 lastReadings = v;
             } catch (IOException e) {
                 Log.w(TAG, "[hmgapi-comfort] vehicle read retry during climate wait: " + e);
@@ -435,10 +503,23 @@ public final class ComfortEngine {
             return;
         }
 
+        OccupantSignalProbe.PassengerPresence presence = occupancyClient.queryPassengerPresence();
+        if (!manual
+                && config.passengerAutoDetect
+                && !ComfortConfig.POLICY_OFF.equals(config.passengerPolicy)
+                && !presence.available) {
+            for (int i = 0; i < 5 && running && !presence.available; i++) {
+                sleepQuietly(500);
+                presence = occupancyClient.queryPassengerPresence();
+            }
+        }
+        lastPassengerPresence = presence;
+
         tempTimeoutRetries = 0;
-        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v);
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v, presence);
         if (plan.actions.isEmpty()) {
             driveTracker.markCompleted();
+            boardingTracker.onSessionClimateEvaluated(config, presence);
             lastClimateStatus = stamp(plan.summary);
             Log.i(TAG, "[hmgapi-comfort] " + plan.summary);
             return;
@@ -446,6 +527,29 @@ public final class ComfortEngine {
 
         boolean appliedAll = executeActionsWithRetry(api, plan.actions);
         driveTracker.markCompleted();
+        boardingTracker.onSessionClimateEvaluated(config, presence);
+        lastClimateStatus = stamp(plan.summary + (appliedAll ? "" : " (partial)"));
+        Log.i(TAG, "[hmgapi-comfort] " + lastClimateStatus);
+        if (config.toastOnApply) {
+            HmgApi.toast(appContext, "Comfort: " + plan.summary);
+        }
+    }
+
+    private void runPassengerBoardingSequence(
+            HmgApi api,
+            Map<String, String> v,
+            OccupantSignalProbe.PassengerPresence presence) throws IOException {
+        float tempF = ComfortPolicy.parseAmbientF(v == null ? null : v.get("outside_temp_f"));
+        if (Float.isNaN(tempF)) {
+            return;
+        }
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluatePassengerBoarding(config, tempF, v, presence);
+        boardingTracker.markBoardingHandled();
+        if (plan.actions.isEmpty()) {
+            Log.i(TAG, "[hmgapi-comfort] " + plan.summary);
+            return;
+        }
+        boolean appliedAll = executeActionsWithRetry(api, plan.actions);
         lastClimateStatus = stamp(plan.summary + (appliedAll ? "" : " (partial)"));
         Log.i(TAG, "[hmgapi-comfort] " + lastClimateStatus);
         if (config.toastOnApply) {
@@ -523,7 +627,7 @@ public final class ComfortEngine {
             }
 
             try {
-                Map<String, String> check = api.vehicle(READ_KEYS);
+                Map<String, String> check = readVehicleReadings(api, READ_KEYS);
                 lastReadings = check;
                 List<ComfortPolicy.Action> retry = new ArrayList<ComfortPolicy.Action>();
                 for (ComfortPolicy.Action act : candidates) {
@@ -553,6 +657,7 @@ public final class ComfortEngine {
                 j.optBoolean("wheel_enabled", d.wheelEnabled),
                 j.optInt("wheel_f", d.wheelF),
                 j.optString("passenger_policy", d.passengerPolicy),
+                j.optBoolean("passenger_auto_detect", d.passengerAutoDetect),
                 j.optString("rear_left_policy", d.rearLeftPolicy),
                 j.optString("rear_right_policy", d.rearRightPolicy),
                 j.optBoolean("vent_enabled", d.ventEnabled),
@@ -573,6 +678,7 @@ public final class ComfortEngine {
         j.put("wheel_enabled", c.wheelEnabled);
         j.put("wheel_f", c.wheelF);
         j.put("passenger_policy", c.passengerPolicy);
+        j.put("passenger_auto_detect", c.passengerAutoDetect);
         j.put("rear_left_policy", c.rearLeftPolicy);
         j.put("rear_right_policy", c.rearRightPolicy);
         j.put("vent_enabled", c.ventEnabled);

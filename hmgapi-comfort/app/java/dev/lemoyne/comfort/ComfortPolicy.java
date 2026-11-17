@@ -1,15 +1,37 @@
 package dev.lemoyne.comfort;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
  * Pure-Java decision logic and session trackers for Comfort & Startup, testable on a desktop JVM.
  */
 public final class ComfortPolicy {
+    /**
+     * hmgapid enforces MAX_ARGS = 16 on wire frames ("vehicle" + up to 15 reading names).
+     * Chunking vehicle reads into <= 8 keys per call keeps argc <= 9 with generous headroom.
+     */
+    public static final int MAX_VEHICLE_BATCH_KEYS = 8;
+
     private ComfortPolicy() {}
+
+    /** Splits a vehicle reading key array into sub-arrays of at most {@code maxPerBatch} keys. */
+    public static List<String[]> chunkVehicleKeys(String[] keys, int maxPerBatch) {
+        if (keys == null || keys.length == 0) {
+            return Collections.emptyList();
+        }
+        int step = Math.max(1, Math.min(15, maxPerBatch));
+        List<String[]> chunks = new ArrayList<String[]>((keys.length + step - 1) / step);
+        for (int i = 0; i < keys.length; i += step) {
+            int end = Math.min(keys.length, i + step);
+            chunks.add(Arrays.copyOfRange(keys, i, end));
+        }
+        return chunks;
+    }
 
     public static final class Action {
         public final String command;   // "seat_heat", "seat_vent", or "wheel_heat"
@@ -58,11 +80,20 @@ public final class ComfortPolicy {
         }
     }
 
+    public static Plan evaluateClimate(ComfortConfig cfg, float tempF, Map<String, String> readings) {
+        return evaluateClimate(cfg, tempF, readings, OccupantSignalProbe.PassengerPresence.UNAVAILABLE);
+    }
+
     /**
      * Evaluates cold-start heat, steering wheel heat, and summer ventilation targets for a drive,
-     * skipping any seat or wheel already active from Bluelink remote climate or manual driver input.
+     * skipping any seat or wheel already active from Bluelink remote climate or manual driver input,
+     * and gating front-passenger heat/ventilation on live passenger seat occupancy when enabled.
      */
-    public static Plan evaluateClimate(ComfortConfig cfg, float tempF, Map<String, String> readings) {
+    public static Plan evaluateClimate(
+            ComfortConfig cfg,
+            float tempF,
+            Map<String, String> readings,
+            OccupantSignalProbe.PassengerPresence passengerPresence) {
         if (!cfg.climateEnabled || !validAmbientF(tempF)) {
             return new Plan(Collections.<Action>emptyList(), "Climate disabled or invalid ambient temp");
         }
@@ -76,8 +107,8 @@ public final class ComfortPolicy {
 
         if (driverHeat > 0) {
             addSeatAction(out, notes, readings, "seat_heat", "driver", driverHeat, false);
-            addSeatAction(out, notes, readings, "seat_heat", "passenger",
-                    followerLevel(driverHeat, cfg.passengerPolicy), false);
+            addPassengerSeatAction(out, notes, readings, "seat_heat",
+                    followerLevel(driverHeat, cfg.passengerPolicy), cfg.passengerAutoDetect, passengerPresence);
             addSeatAction(out, notes, readings, "seat_heat", "rear_left",
                     followerLevel(driverHeat, cfg.rearLeftPolicy), true);
             addSeatAction(out, notes, readings, "seat_heat", "rear_right",
@@ -85,8 +116,8 @@ public final class ComfortPolicy {
         } else if (cfg.ventEnabled && tempF >= cfg.ventLowF) {
             int driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
             addSeatAction(out, notes, readings, "seat_vent", "driver", driverVent, false);
-            addSeatAction(out, notes, readings, "seat_vent", "passenger",
-                    followerLevel(driverVent, cfg.passengerPolicy), false);
+            addPassengerSeatAction(out, notes, readings, "seat_vent",
+                    followerLevel(driverVent, cfg.passengerPolicy), cfg.passengerAutoDetect, passengerPresence);
         }
 
         if (cfg.wheelEnabled && tempF <= cfg.wheelF) {
@@ -100,9 +131,59 @@ public final class ComfortPolicy {
         }
 
         String summary = notes.isEmpty()
-                ? String.format("No climate needed at %.1f F", tempF)
-                : String.format("%.1f F: %s", tempF, join(notes));
+                ? String.format(Locale.US, "No climate needed at %.1f F", Float.valueOf(tempF))
+                : String.format(Locale.US, "%.1f F: %s", Float.valueOf(tempF), join(notes));
         return new Plan(out, summary);
+    }
+
+    /**
+     * Evaluates front-passenger seat heating or ventilation when a passenger boards after the
+     * initial startup climate sequence already ran with an empty passenger seat.
+     */
+    public static Plan evaluatePassengerBoarding(
+            ComfortConfig cfg,
+            float tempF,
+            Map<String, String> readings,
+            OccupantSignalProbe.PassengerPresence passengerPresence) {
+        if (!cfg.climateEnabled
+                || !cfg.passengerAutoDetect
+                || ComfortConfig.POLICY_OFF.equals(cfg.passengerPolicy)
+                || !validAmbientF(tempF)
+                || passengerPresence == null
+                || !passengerPresence.available
+                || !passengerPresence.occupied) {
+            return new Plan(Collections.<Action>emptyList(), "No passenger climate needed");
+        }
+        if (isSeatAlreadyActive(readings, "passenger")) {
+            return new Plan(Collections.<Action>emptyList(), "Passenger detected (seat already active)");
+        }
+
+        int driverHeat = 0;
+        if (tempF <= cfg.heatHighF) driverHeat = 3;
+        else if (tempF <= cfg.heatMedF) driverHeat = 2;
+        else if (tempF <= cfg.heatLowF) driverHeat = 1;
+
+        if (driverHeat > 0) {
+            int passHeat = followerLevel(driverHeat, cfg.passengerPolicy);
+            if (passHeat > 0) {
+                String lvl = levelName(passHeat);
+                return new Plan(
+                        Collections.singletonList(new Action("seat_heat", "passenger", lvl)),
+                        String.format(Locale.US, "Passenger detected (%.1f F): passenger heat %s",
+                                Float.valueOf(tempF), lvl));
+            }
+        } else if (cfg.ventEnabled && tempF >= cfg.ventLowF) {
+            int driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
+            int passVent = followerLevel(driverVent, cfg.passengerPolicy);
+            if (passVent > 0) {
+                String lvl = levelName(passVent);
+                return new Plan(
+                        Collections.singletonList(new Action("seat_vent", "passenger", lvl)),
+                        String.format(Locale.US, "Passenger detected (%.1f F): passenger vent %s",
+                                Float.valueOf(tempF), lvl));
+            }
+        }
+        return new Plan(Collections.<Action>emptyList(), "No passenger climate needed");
     }
 
     public static int followerLevel(int driverLevel, String policy) {
@@ -115,6 +196,28 @@ public final class ComfortPolicy {
     /** Fallback level when a 2-step rear seat refuses "medium": drops to "low". */
     public static String fallbackTwoStep(String level) {
         return "medium".equals(level) ? "low" : level;
+    }
+
+    private static void addPassengerSeatAction(
+            List<Action> out,
+            List<String> notes,
+            Map<String, String> readings,
+            String cmd,
+            int level,
+            boolean autoDetect,
+            OccupantSignalProbe.PassengerPresence presence) {
+        if (level <= 0) return;
+        if (isSeatAlreadyActive(readings, "passenger")) {
+            notes.add("passenger kept (already active)");
+            return;
+        }
+        if (autoDetect && presence != null && presence.available && !presence.occupied) {
+            notes.add("passenger empty");
+            return;
+        }
+        String lvl = levelName(level);
+        out.add(new Action(cmd, "passenger", lvl));
+        notes.add("passenger" + ("seat_vent".equals(cmd) ? " vent " : " heat ") + lvl);
     }
 
     private static void addSeatAction(
@@ -321,6 +424,10 @@ public final class ComfortPolicy {
             return shouldTrigger(m, false);
         }
 
+        public synchronized boolean isCompleted() {
+            return appliedThisDrive;
+        }
+
         public synchronized void markCompleted() {
             appliedThisDrive = true;
         }
@@ -328,6 +435,73 @@ public final class ComfortPolicy {
         public synchronized void reset() {
             appliedThisDrive = false;
             offTicks = 0;
+        }
+    }
+
+    /**
+     * Tracks mid-session front-passenger boarding so if the vehicle started with an empty passenger
+     * seat and a passenger boards later (either still in Park or during the drive), passenger seat
+     * warming/ventilation activates automatically once without overriding manual changes.
+     */
+    public static final class PassengerBoardingTracker {
+        private boolean sessionReady;
+        private boolean appliedForCurrentOccupant;
+        private int occupiedTicks;
+        private int emptyTicks;
+
+        public synchronized void onSessionClimateEvaluated(
+                ComfortConfig cfg, OccupantSignalProbe.PassengerPresence presenceAtStart) {
+            sessionReady = true;
+            occupiedTicks = 0;
+            emptyTicks = 0;
+            boolean policyActive = cfg != null && !ComfortConfig.POLICY_OFF.equals(cfg.passengerPolicy);
+            boolean alreadyHandled = policyActive
+                    && (presenceAtStart == null
+                            || !presenceAtStart.available
+                            || presenceAtStart.occupied);
+            appliedForCurrentOccupant = alreadyHandled;
+        }
+
+        public synchronized boolean shouldTriggerLateBoarding(
+                ComfortConfig cfg,
+                Map<String, String> readings,
+                boolean screenInteractive,
+                OccupantSignalProbe.PassengerPresence presence) {
+            if (!sessionReady
+                    || cfg == null
+                    || !cfg.climateEnabled
+                    || !cfg.passengerAutoDetect
+                    || ComfortConfig.POLICY_OFF.equals(cfg.passengerPolicy)
+                    || !isActiveClimateSession(readings, screenInteractive)
+                    || presence == null
+                    || !presence.available) {
+                return false;
+            }
+            if (presence.occupied) {
+                emptyTicks = 0;
+                occupiedTicks++;
+                if (appliedForCurrentOccupant) {
+                    return false;
+                }
+                return presence.asstBelt == 1 || occupiedTicks >= 2;
+            }
+            occupiedTicks = 0;
+            emptyTicks++;
+            if (emptyTicks >= 6) {
+                appliedForCurrentOccupant = false;
+            }
+            return false;
+        }
+
+        public synchronized void markBoardingHandled() {
+            appliedForCurrentOccupant = true;
+        }
+
+        public synchronized void reset() {
+            sessionReady = false;
+            appliedForCurrentOccupant = false;
+            occupiedTicks = 0;
+            emptyTicks = 0;
         }
     }
 

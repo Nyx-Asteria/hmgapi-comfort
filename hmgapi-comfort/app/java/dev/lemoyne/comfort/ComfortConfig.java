@@ -18,6 +18,7 @@ public final class ComfortConfig {
     public final boolean wheelEnabled;
     public final int wheelF;
     public final String passengerPolicy;
+    public final boolean passengerAutoDetect;
     public final String rearLeftPolicy;
     public final String rearRightPolicy;
     public final boolean ventEnabled;
@@ -43,6 +44,29 @@ public final class ComfortConfig {
             int ventMedF,
             int ventHighF,
             boolean toastOnApply) {
+        this(welcomeDismiss, welcomeDelayMs, climateEnabled, heatHighF, heatMedF, heatLowF,
+                wheelEnabled, wheelF, passengerPolicy, true, rearLeftPolicy, rearRightPolicy,
+                ventEnabled, ventLowF, ventMedF, ventHighF, toastOnApply);
+    }
+
+    public ComfortConfig(
+            boolean welcomeDismiss,
+            int welcomeDelayMs,
+            boolean climateEnabled,
+            int heatHighF,
+            int heatMedF,
+            int heatLowF,
+            boolean wheelEnabled,
+            int wheelF,
+            String passengerPolicy,
+            boolean passengerAutoDetect,
+            String rearLeftPolicy,
+            String rearRightPolicy,
+            boolean ventEnabled,
+            int ventLowF,
+            int ventMedF,
+            int ventHighF,
+            boolean toastOnApply) {
         this.welcomeDismiss = welcomeDismiss;
         this.welcomeDelayMs = clamp(welcomeDelayMs, 0, 10000);
         this.climateEnabled = climateEnabled;
@@ -55,6 +79,7 @@ public final class ComfortConfig {
         this.wheelEnabled = wheelEnabled;
         this.wheelF = clamp(wheelF, -30, 90);
         this.passengerPolicy = normPolicy(passengerPolicy);
+        this.passengerAutoDetect = passengerAutoDetect;
         this.rearLeftPolicy = normPolicy(rearLeftPolicy);
         this.rearRightPolicy = normPolicy(rearRightPolicy);
         this.ventEnabled = ventEnabled;
@@ -72,7 +97,7 @@ public final class ComfortConfig {
                 true, 800,
                 true, 25, 38, 50,
                 true, 45,
-                POLICY_OFF, POLICY_OFF, POLICY_OFF,
+                POLICY_OFF, true, POLICY_OFF, POLICY_OFF,
                 true, 75, 85, 95,
                 false);
     }

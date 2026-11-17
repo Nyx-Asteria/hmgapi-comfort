@@ -69,6 +69,13 @@
       ]
     },
     {
+      "key": "passenger_auto_detect",
+      "type": "toggle",
+      "default": true,
+      "title": "Front passenger only when occupied",
+      "description": "Applies the front passenger seat policy only when a passenger is detected in the seat (including if they board after starting)."
+    },
+    {
       "key": "rear_left_policy",
       "type": "choice",
       "default": "off",

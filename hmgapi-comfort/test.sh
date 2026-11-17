@@ -60,10 +60,11 @@ for sig in hv.ready gear.park charging outside_temp_f wheel_heat seat_state.driv
     has "$sig in vehicle.txt" "hmgapi-comfort $sig" "$(cat "$R/data/hmgapi/state/vehicle.txt")"
 done
 
-printf '{"heat_high_f":28,"passenger_policy":"match","vent_enabled":false}\n' > "$R/data/hmgapi/settings/hmgapi-comfort.json"
+printf '{"heat_high_f":28,"passenger_policy":"match","passenger_auto_detect":false,"vent_enabled":false}\n' > "$R/data/hmgapi/settings/hmgapi-comfort.json"
 eng apply
 check "setting override applies cleanly" 0 "$rc"
 has "public state reflects passenger_policy match" '"match"' "$(cat "$R/data/hmgapi/public/state.json")"
+has "public state exposes passenger_auto_detect setting" '"passenger_auto_detect"' "$(cat "$R/data/hmgapi/public/state.json")"
 
 eng remove hmgapi-comfort
 check "engine remove succeeds" 0 "$rc"

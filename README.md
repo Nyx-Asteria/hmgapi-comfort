@@ -19,8 +19,9 @@ Automatically dismisses the infotainment startup confirmation screen across cold
   - Ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR across cold-boot initialization, and **never overrides** active Bluelink or manual seat/wheel settings.
 - **3-Tier Warm-Weather Front Seat Ventilation**
   - Automatic summer seat cooling thresholds for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats.
-- **Passenger & Rear Heated Seat Policies**
+- **Automatic Front-Passenger Occupancy Detection & Rear Seat Policies**
   - **Front Passenger Policy** (`Off`, `-1 Step` gentler than driver, or `Match` driver) for both heating and cooling.
+  - **Only When Passenger Detected** *(enabled by default)*: reads live Gen5W seat-occupancy classification & buckle sensors (`HSCAN.getOccupancy`, `SYS.getClassStatus`, `HSCAN.getAsstStBltSwSta`) so solo drives never heat or cool an empty passenger seat—and **automatically turns on passenger comfort mid-session** if a passenger sits down or buckles up after startup.
   - **Rear Heated Seats Policy** (`Off`, `-1 Step`, or `Match` up to 2 rear levels) for vehicles with rear seat heaters.
 - **Material Design 3 Widescreen Dashboard (`1920×720`)**
   - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live 4-seat cabin preview tiles, a `-5 °F .. 115 °F` seasonal comfort spectrum bar with live outside temperature pin, one-tap **Run Climate Check** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.

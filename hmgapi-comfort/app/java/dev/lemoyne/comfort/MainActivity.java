@@ -57,6 +57,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private ComfortConfig current = ComfortConfig.defaults();
     private float latestAmbientF = Float.NaN;
     private volatile Map<String, String> latestReadings;
+    private OccupantSignalProbe.PassengerPresence latestPresence =
+            OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
 
     // Left rail & navigation views
     private TextView lblConnSub;
@@ -96,6 +98,9 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private ComfortWidgets.M3Switch swVent;
     private ComfortWidgets.M3Switch swToast;
     private ComfortWidgets.M3SegmentedGroup segPassenger;
+    private ComfortWidgets.M3Switch swPassengerAuto;
+    private LinearLayout passengerAutoRow;
+    private TextView lblPassengerAutoSub;
     private ComfortWidgets.M3SegmentedGroup segRearLeft;
     private ComfortWidgets.M3SegmentedGroup segRearRight;
 
@@ -440,7 +445,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                                 current.welcomeDismiss, current.welcomeDelayMs,
                                 current.climateEnabled, def.heatHighF, def.heatMedF, def.heatLowF,
                                 current.wheelEnabled, def.wheelF,
-                                current.passengerPolicy, current.rearLeftPolicy, current.rearRightPolicy,
+                                current.passengerPolicy, current.passengerAutoDetect,
+                                current.rearLeftPolicy, current.rearRightPolicy,
                                 current.ventEnabled, def.ventLowF, def.ventMedF, def.ventHighF,
                                 current.toastOnApply));
                         Toast.makeText(MainActivity.this, "Reset thresholds to defaults", Toast.LENGTH_SHORT).show();
@@ -597,7 +603,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             public void onToggle(boolean checked) {
                 save(new ComfortConfig(checked, current.welcomeDelayMs,
                         current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                        current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                        current.wheelEnabled, current.wheelF,
+                        current.passengerPolicy, current.passengerAutoDetect,
                         current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                         current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
             }
@@ -682,7 +689,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             public void onToggle(boolean checked) {
                 save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                         checked, current.heatHighF, current.heatMedF, current.heatLowF,
-                        current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                        current.wheelEnabled, current.wheelF,
+                        current.passengerPolicy, current.passengerAutoDetect,
                         current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                         current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
             }
@@ -700,7 +708,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             public void onToggle(boolean checked) {
                 save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                         current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                        checked, current.wheelF, current.passengerPolicy,
+                        checked, current.wheelF,
+                        current.passengerPolicy, current.passengerAutoDetect,
                         current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                         current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
             }
@@ -714,7 +723,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             public void onToggle(boolean checked) {
                 save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                         current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                        current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                        current.wheelEnabled, current.wheelF,
+                        current.passengerPolicy, current.passengerAutoDetect,
                         current.rearLeftPolicy, current.rearRightPolicy, checked,
                         current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
             }
@@ -728,7 +738,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             public void onToggle(boolean checked) {
                 save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                         current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                        current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                        current.wheelEnabled, current.wheelF,
+                        current.passengerPolicy, current.passengerAutoDetect,
                         current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                         current.ventLowF, current.ventMedF, current.ventHighF, checked));
             }
@@ -747,12 +758,53 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                     public void onPick(String val) {
                         save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                                 current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                                current.wheelEnabled, current.wheelF, val,
+                                current.wheelEnabled, current.wheelF,
+                                val, current.passengerAutoDetect,
                                 current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                                 current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
                     }
                 });
         polCard.addView(policyBlock("Front Passenger", "Heating & summer ventilation", segPassenger, 10));
+
+        swPassengerAuto = new ComfortWidgets.M3Switch(
+                this, current.passengerAutoDetect, new ComfortWidgets.ToggleListener() {
+                    @Override
+                    public void onToggle(boolean checked) {
+                        save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
+                                current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
+                                current.wheelEnabled, current.wheelF,
+                                current.passengerPolicy, checked,
+                                current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
+                                current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
+                    }
+                });
+        passengerAutoRow = new LinearLayout(this);
+        passengerAutoRow.setOrientation(LinearLayout.HORIZONTAL);
+        passengerAutoRow.setGravity(Gravity.CENTER_VERTICAL);
+        passengerAutoRow.addView(ComfortWidgets.iconBadge(
+                this, ComfortIcons.RADAR, SECONDARY_CONT, ON_SECONDARY_CONT, 32, 17));
+        LinearLayout paText = new LinearLayout(this);
+        paText.setOrientation(LinearLayout.VERTICAL);
+        paText.setPadding(d(10), 0, d(8), 0);
+        paText.addView(label("Only when passenger detected", 13.5f, ON_SURFACE, true));
+        lblPassengerAutoSub = label(
+                "Uses seat weight & buckle sensors (auto-applies on late boarding)",
+                11.5f, ON_SURFACE_VAR, false);
+        paText.addView(lblPassengerAutoSub);
+        passengerAutoRow.addView(paText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        passengerAutoRow.addView(swPassengerAuto);
+        passengerAutoRow.setClickable(true);
+        passengerAutoRow.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                swPassengerAuto.performClick();
+            }
+        });
+        LinearLayout.LayoutParams paLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        paLp.topMargin = d(8);
+        polCard.addView(passengerAutoRow, paLp);
+        polCard.addView(hairline(8));
 
         segRearLeft = new ComfortWidgets.M3SegmentedGroup(
                 this, POLICY_OPTIONS, current.rearLeftPolicy, 36, new ComfortWidgets.PickListener() {
@@ -760,12 +812,13 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                     public void onPick(String val) {
                         save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                                 current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                                current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                                current.wheelEnabled, current.wheelF,
+                                current.passengerPolicy, current.passengerAutoDetect,
                                 val, current.rearRightPolicy, current.ventEnabled,
                                 current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
                     }
                 });
-        polCard.addView(policyBlock("Rear Left Seat", "Winter heating (2-step seats map Med → Low)", segRearLeft, 10));
+        polCard.addView(policyBlock("Rear Left Seat", "Winter heating (2-step seats map Med → Low)", segRearLeft, 0));
 
         segRearRight = new ComfortWidgets.M3SegmentedGroup(
                 this, POLICY_OPTIONS, current.rearRightPolicy, 36, new ComfortWidgets.PickListener() {
@@ -773,12 +826,13 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                     public void onPick(String val) {
                         save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                                 current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                                current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                                current.wheelEnabled, current.wheelF,
+                                current.passengerPolicy, current.passengerAutoDetect,
                                 current.rearLeftPolicy, val, current.ventEnabled,
                                 current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
                     }
                 });
-        polCard.addView(policyBlock("Rear Right Seat", "Winter heating (2-step seats map Med → Low)", segRearRight, 10));
+        polCard.addView(policyBlock("Rear Right Seat", "Winter heating (2-step seats map Med → Low)", segRearRight, 8));
 
         row.addView(featCard, colWeight(0, 6));
         row.addView(polCard, colWeight(6, 0));
@@ -1176,11 +1230,13 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private String buildHmgProbeSummary() {
         Map<String, String> r = latestReadings;
         if (r == null || r.isEmpty()) {
-            return "waiting for HMG-API readings";
+            return "waiting for HMG-API readings (" + latestPresence.summary() + ")";
         }
         return "hv.ready=" + val(r, "hv.ready")
                 + " gear.park=" + val(r, "gear.park")
                 + " charging=" + val(r, "charging")
+                + " temp_f=" + val(r, "outside_temp_f")
+                + " pass_occ=[" + latestPresence.summary() + "]"
                 + " seat_state[drv=" + val(r, "seat_state.driver")
                 + ", psg=" + val(r, "seat_state.passenger")
                 + ", rl=" + val(r, "seat_state.rear_left")
@@ -1197,7 +1253,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         int nextDelay = ComfortConfig.clamp(current.welcomeDelayMs + deltaMs, 0, 10000);
         save(new ComfortConfig(current.welcomeDismiss, nextDelay,
                 current.climateEnabled, current.heatHighF, current.heatMedF, current.heatLowF,
-                current.wheelEnabled, current.wheelF, current.passengerPolicy,
+                current.wheelEnabled, current.wheelF,
+                current.passengerPolicy, current.passengerAutoDetect,
                 current.rearLeftPolicy, current.rearRightPolicy, current.ventEnabled,
                 current.ventLowF, current.ventMedF, current.ventHighF, current.toastOnApply));
     }
@@ -1214,7 +1271,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         else if (which == 6) vh += delta;
         save(new ComfortConfig(current.welcomeDismiss, current.welcomeDelayMs,
                 current.climateEnabled, hh, hm, hl, current.wheelEnabled, wf,
-                current.passengerPolicy, current.rearLeftPolicy, current.rearRightPolicy,
+                current.passengerPolicy, current.passengerAutoDetect,
+                current.rearLeftPolicy, current.rearRightPolicy,
                 current.ventEnabled, vl, vm, vh, current.toastOnApply));
     }
 
@@ -1238,6 +1296,9 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         current = s.config;
         Map<String, String> r = s.readings;
         latestReadings = r;
+        latestPresence = s.passengerPresence == null
+                ? OccupantSignalProbe.PassengerPresence.UNAVAILABLE
+                : s.passengerPresence;
 
         // Connection status
         lblConnSub.setText(s.connected ? "Connected · HMG-API" : "Waiting for HMG-API…");
@@ -1284,11 +1345,18 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
                 wheelOn ? PRIMARY_CONT : SURFACE_HIGH,
                 wheelOn ? ON_PRIMARY_CONT : ON_SURFACE_VAR);
 
-        // Cabin 4-seat live tiles
+        // Cabin 4-seat live tiles + passenger occupancy badge
         updateSeatTile(tileDriver, r, "driver", true);
         updateSeatTile(tilePassenger, r, "passenger", true);
         updateSeatTile(tileRearLeft, r, "rear_left", false);
         updateSeatTile(tileRearRight, r, "rear_right", false);
+        if (latestPresence.available && latestPresence.occupied) {
+            tilePassenger.setBadge("Occupied", OK);
+        } else if (latestPresence.available) {
+            tilePassenger.setBadge("Empty", ON_SURFACE_VAR);
+        } else {
+            tilePassenger.setBadge("", ON_SURFACE_VAR);
+        }
 
         // Activity timestamps & readable messages
         bindActivity(s.lastWelcomeStatus, lblWelcomeTime, lblWelcomeStatus);
@@ -1337,6 +1405,15 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         }
 
         segPassenger.setValue(c.passengerPolicy);
+        swPassengerAuto.setChecked(c.passengerAutoDetect, false);
+        passengerAutoRow.setAlpha(!ComfortConfig.POLICY_OFF.equals(c.passengerPolicy) ? 1f : 0.45f);
+        if (latestPresence.available) {
+            lblPassengerAutoSub.setText("Seat sensor: "
+                    + (latestPresence.occupied ? "Occupied" : "Empty")
+                    + " · auto-applies on late boarding");
+        } else {
+            lblPassengerAutoSub.setText("Uses seat weight & buckle sensors (auto-applies on late boarding)");
+        }
         segRearLeft.setValue(c.rearLeftPolicy);
         segRearRight.setValue(c.rearRightPolicy);
 
@@ -1459,6 +1536,15 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
 
     private void openHomeScreenTiles() {
         try {
+            getPackageManager().getPackageInfo("dev.lemoyne.tilemanager", 0);
+            Intent tm = new Intent();
+            tm.setClassName("dev.lemoyne.tilemanager", "dev.lemoyne.tilemanager.MainActivity");
+            tm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(tm);
+            return;
+        } catch (Throwable ignored) {
+        }
+        try {
             Intent it = new Intent();
             it.setClassName("hmgapi.app", "hmgapi.app.MainActivity");
             it.putExtra("tab", 1);
@@ -1466,11 +1552,16 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             startActivity(it);
         } catch (Throwable t) {
-            Toast.makeText(this, "Open HMG-API > Settings > Home screen", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Open Tile Manager or HMG-API > Home screen", Toast.LENGTH_SHORT).show();
         }
     }
 
     private boolean hasHomeScreenTileManager() {
+        try {
+            getPackageManager().getPackageInfo("dev.lemoyne.tilemanager", 0);
+            return true;
+        } catch (Throwable ignored) {
+        }
         try {
             if (new File("/data/hmgapi/public/launcher-tiles.json").isFile()) return true;
             ApplicationInfo ai = getPackageManager().getApplicationInfo(

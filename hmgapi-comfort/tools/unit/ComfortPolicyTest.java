@@ -259,6 +259,11 @@ public final class ComfortPolicyTest {
             public Map<String, String> readSignals(boolean fullScan) {
                 return new LinkedHashMap<String, String>(liveSignals);
             }
+
+            @Override
+            public OccupantSignalProbe.PassengerPresence readPassengerPresence() {
+                return OccupantSignalProbe.PassengerPresence.fromSignalMap(liveSignals);
+            }
         };
 
         OccupantSignalProbe probe = new OccupantSignalProbe(mockSrc, "UID 1000 test");
@@ -288,7 +293,10 @@ public final class ComfortPolicyTest {
         check("report never leaks blocked VIN signal", false,
                 fullReport.contains("SHOULD_BE_BLOCKED") || fullReport.contains("SYS.getVIN"));
 
-        // 13. LoopbackServer + LoopbackClient round-trip & graceful fallback
+        // 13. LoopbackServer + LoopbackClient round-trip & OCCUPANCY fast query
+        liveSignals.put("HSCAN.getOccupancy", "2");
+        liveSignals.put("SYS.getClassStatus", "2");
+        liveSignals.put("HSCAN.getAsstStBltSwSta", "1");
         OccupantSignalProbe.LoopbackServer srv = new OccupantSignalProbe.LoopbackServer(probe, 0);
         srv.start();
         try {
@@ -296,6 +304,11 @@ public final class ComfortPolicyTest {
             OccupantSignalProbe.LoopbackClient cli = new OccupantSignalProbe.LoopbackClient(
                     port, new OccupantSignalProbe(mockSrc, "fallback"));
             check("loopback pingDaemon succeeds", true, cli.pingDaemon());
+            OccupantSignalProbe.PassengerPresence loopOcc = cli.queryPassengerPresence();
+            check("loopback OCCUPANCY query reports available & occupied",
+                    "true/true/2/2/1",
+                    loopOcc.available + "/" + loopOcc.occupied + "/"
+                            + loopOcc.hscanOccupancy + "/" + loopOcc.sysClassStatus + "/" + loopOcc.asstBelt);
             OccupantSignalProbe.UiState uiState = cli.pollUi(false, "hv.ready=1");
             check("loopback pollUi returns UID 1000 banner", true,
                     uiState.sourceBanner.startsWith("UID 1000 test"));
@@ -332,6 +345,140 @@ public final class ComfortPolicyTest {
         List<String> mounts = ComfortUsbExporter.parseUsbMountPoints(sampleMounts);
         check("parseUsbMountPoints orders /storage/usb0 then /mnt/media_rw/usb0 and blocks internal partitions",
                 Arrays.asList("/storage/usb0", "/mnt/media_rw/usb0"), mounts);
+
+        // 15. hmgapid MAX_ARGS (16) vehicle batch chunking invariant
+        String[] sixteenKeys = {
+            "hv.ready", "gear.park", "charging", "outside_temp_f", "outside_temp", "wheel_heat",
+            "seat_heat.driver", "seat_heat.passenger", "seat_heat.rear_left", "seat_heat.rear_right",
+            "seat_vent.driver", "seat_vent.passenger",
+            "seat_state.driver", "seat_state.passenger", "seat_state.rear_left", "seat_state.rear_right"
+        };
+        List<String[]> batches = ComfortPolicy.chunkVehicleKeys(sixteenKeys, ComfortPolicy.MAX_VEHICLE_BATCH_KEYS);
+        check("16 vehicle keys split into 2 batches of 8", 2, batches.size());
+        check("batch 0 has 8 keys (argc=9 <= 16)", 8, batches.get(0).length);
+        check("batch 1 has 8 keys (argc=9 <= 16)", 8, batches.get(1).length);
+        boolean allUnderMaxArgs = true;
+        int totalChunked = 0;
+        for (int i = 0; i < batches.size(); i++) {
+            totalChunked += batches.get(i).length;
+            if (1 + batches.get(i).length > 16) allUnderMaxArgs = false;
+        }
+        check("all vehicle IPC batches satisfy argc <= 16", true, allUnderMaxArgs && totalChunked == 16);
+
+        // 16. PassengerPresence classification across Ioniq 5 empirical states & wire codec
+        OccupantSignalProbe.PassengerPresence preCan = OccupantSignalProbe.PassengerPresence.fromRaw(0, 0, 0, 0);
+        check("pre-CAN (0,0,0,0) unavailable & unoccupied", "false/false", preCan.available + "/" + preCan.occupied);
+        OccupantSignalProbe.PassengerPresence invalidCan = OccupantSignalProbe.PassengerPresence.fromRaw(15, 255, -1, 0);
+        check("invalid CAN (15,255,-1,0) unavailable & unoccupied", "false/false",
+                invalidCan.available + "/" + invalidCan.occupied);
+        OccupantSignalProbe.PassengerPresence soloEmpty = OccupantSignalProbe.PassengerPresence.fromRaw(1, 1, 0, 0);
+        check("solo empty (1,1,0,0) available & unoccupied", "true/false",
+                soloEmpty.available + "/" + soloEmpty.occupied);
+        OccupantSignalProbe.PassengerPresence childCrs = OccupantSignalProbe.PassengerPresence.fromRaw(1, 3, 0, 0);
+        check("ODS child CRS (1,3,0,0) available & unoccupied (never heats CRS)", "true/false",
+                childCrs.available + "/" + childCrs.occupied);
+        OccupantSignalProbe.PassengerPresence seatedUnbuckled = OccupantSignalProbe.PassengerPresence.fromRaw(2, 2, 0, 0);
+        check("adult seated unbuckled (2,2,0,0) available & occupied", "true/true",
+                seatedUnbuckled.available + "/" + seatedUnbuckled.occupied);
+        OccupantSignalProbe.PassengerPresence seatedBuckled = OccupantSignalProbe.PassengerPresence.fromRaw(2, 2, 1, 0);
+        check("adult seated buckled (2,2,1,0) available & occupied", "true/true",
+                seatedBuckled.available + "/" + seatedBuckled.occupied);
+        OccupantSignalProbe.PassengerPresence beltOnly = OccupantSignalProbe.PassengerPresence.fromRaw(1, 1, 1, 0);
+        check("passenger belt buckled (1,1,1,0) available & occupied", "true/true",
+                beltOnly.available + "/" + beltOnly.occupied);
+        OccupantSignalProbe.PassengerPresence decoded =
+                OccupantSignalProbe.PassengerPresence.decode(seatedBuckled.encode());
+        check("PassengerPresence encode/decode round-trip", seatedBuckled.encode(), decoded.encode());
+
+        // 17. Automatic passenger occupancy gating on startup climate (heat & vent)
+        ComfortConfig autoPass = new ComfortConfig(
+                true, 800, true, 25, 38, 50, true, 45,
+                ComfortConfig.POLICY_MATCH, true, ComfortConfig.POLICY_OFF, ComfortConfig.POLICY_OFF,
+                true, 75, 85, 95, false);
+        ComfortConfig alwaysPass = new ComfortConfig(
+                true, 800, true, 25, 38, 50, true, 45,
+                ComfortConfig.POLICY_MATCH, false, ComfortConfig.POLICY_OFF, ComfortConfig.POLICY_OFF,
+                true, 75, 85, 95, false);
+
+        ComfortPolicy.Plan soloHeat = ComfortPolicy.evaluateClimate(
+                autoPass, 22.0f, state("seat_state.driver", "2", "seat_state.passenger", "2", "wheel_heat", "0"), soloEmpty);
+        check("auto-detect skips empty passenger seat at 22 F",
+                "seat_heat driver high | wheel_heat on", actions(soloHeat.actions));
+        check("auto-detect summary notes passenger empty", true, soloHeat.summary.contains("passenger empty"));
+
+        ComfortPolicy.Plan occHeat = ComfortPolicy.evaluateClimate(
+                autoPass, 22.0f, state("seat_state.driver", "2", "seat_state.passenger", "2", "wheel_heat", "0"), seatedUnbuckled);
+        check("auto-detect warms occupied passenger seat at 22 F",
+                "seat_heat driver high | seat_heat passenger high | wheel_heat on", actions(occHeat.actions));
+
+        ComfortPolicy.Plan soloVent = ComfortPolicy.evaluateClimate(
+                autoPass, 90.0f, state("seat_state.driver", "2", "seat_state.passenger", "2"), soloEmpty);
+        check("auto-detect skips empty passenger ventilation at 90 F",
+                "seat_vent driver medium", actions(soloVent.actions));
+
+        ComfortPolicy.Plan occVent = ComfortPolicy.evaluateClimate(
+                autoPass, 90.0f, state("seat_state.driver", "2", "seat_state.passenger", "2"), seatedBuckled);
+        check("auto-detect cools occupied passenger seat at 90 F",
+                "seat_vent driver medium | seat_vent passenger medium", actions(occVent.actions));
+
+        ComfortPolicy.Plan fallbackHeat = ComfortPolicy.evaluateClimate(
+                autoPass, 22.0f, state("seat_state.driver", "2", "seat_state.passenger", "2", "wheel_heat", "0"),
+                OccupantSignalProbe.PassengerPresence.UNAVAILABLE);
+        check("unavailable sensor falls back gracefully to configured policy",
+                "seat_heat driver high | seat_heat passenger high | wheel_heat on", actions(fallbackHeat.actions));
+
+        ComfortPolicy.Plan forcedHeat = ComfortPolicy.evaluateClimate(
+                alwaysPass, 22.0f, state("seat_state.driver", "2", "seat_state.passenger", "2", "wheel_heat", "0"), soloEmpty);
+        check("passengerAutoDetect=false warms passenger even when empty",
+                "seat_heat driver high | seat_heat passenger high | wheel_heat on", actions(forcedHeat.actions));
+
+        // 18. Mid-session late passenger boarding tracker
+        ComfortPolicy.PassengerBoardingTracker bt = new ComfortPolicy.PassengerBoardingTracker();
+        Map<String, String> drvSession = state(
+                "hv.ready", "1", "gear.park", "0", "seat_state.driver", "8", "seat_state.passenger", "2");
+        bt.onSessionClimateEvaluated(autoPass, soloEmpty);
+        check("brief 1-tick seat lean ignored", false,
+                bt.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedUnbuckled));
+        check("sustained 2-tick seated passenger triggers late boarding", true,
+                bt.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedUnbuckled));
+        ComfortPolicy.Plan boardPlan = ComfortPolicy.evaluatePassengerBoarding(
+                autoPass, 24.0f, drvSession, seatedUnbuckled);
+        check("late boarding plan warms passenger seat only",
+                "seat_heat passenger high", actions(boardPlan.actions));
+        bt.markBoardingHandled();
+        check("does not re-fire while same passenger remains seated (respects manual Off)", false,
+                bt.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedBuckled));
+        for (int i = 0; i < 5; i++) {
+            check("short unseat <6 polls does not re-arm", false,
+                    bt.shouldTriggerLateBoarding(autoPass, drvSession, true, soloEmpty));
+        }
+        check("6th empty poll re-arms tracker for next passenger", false,
+                bt.shouldTriggerLateBoarding(autoPass, drvSession, true, soloEmpty));
+        check("buckling belt triggers immediately on 1st tick after re-arm", true,
+                bt.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedBuckled));
+
+        ComfortPolicy.PassengerBoardingTracker btSeatedStart = new ComfortPolicy.PassengerBoardingTracker();
+        btSeatedStart.onSessionClimateEvaluated(autoPass, seatedUnbuckled);
+        check("passenger already seated at startup does not double-fire mid-session", false,
+                btSeatedStart.shouldTriggerLateBoarding(autoPass, drvSession, true, seatedBuckled));
+
+        // 19. Refined Signal Inspector candidate & noisy-counter filters from Ioniq 5 capture
+        check("candidate matches HSCAN.getAsstStBltSwSta", true,
+                OccupantSignalProbe.isOccupantCandidate("HSCAN.getAsstStBltSwSta"));
+        check("candidate matches SYS.getClassStatus", true,
+                OccupantSignalProbe.isOccupantCandidate("SYS.getClassStatus"));
+        check("candidate matches BCM.getAstSeatBelt", true,
+                OccupantSignalProbe.isOccupantCandidate("BCM.getAstSeatBelt"));
+        check("candidate ignores RADIO.getLastAMFrequency (not 'ast')", false,
+                OccupantSignalProbe.isOccupantCandidate("RADIO.getLastAMFrequency"));
+        check("candidate ignores HEV.getLastDepartTime (not 'ast')", false,
+                OccupantSignalProbe.isOccupantCandidate("HEV.getLastDepartTime"));
+        check("noisy filter catches SXM65H.getTime", true,
+                OccupantSignalProbe.isNoisyCounter("SXM65H.getTime"));
+        check("noisy filter catches HSCAN.getSpeedDistKM", true,
+                OccupantSignalProbe.isNoisyCounter("HSCAN.getSpeedDistKM"));
+        check("noisy filter catches HEVFlag.DATC_CLMTPWRCNSMPTN_W", true,
+                OccupantSignalProbe.isNoisyCounter("HEVFlag.DATC_CLMTPWRCNSMPTN_W"));
 
         System.exit(fail);
     }

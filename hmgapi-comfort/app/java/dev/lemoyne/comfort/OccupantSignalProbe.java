@@ -51,6 +51,102 @@ public final class OccupantSignalProbe {
         String deviceBuildSummary();
         List<String> signatureInventory();
         Map<String, String> readSignals(boolean fullScan);
+        PassengerPresence readPassengerPresence();
+    }
+
+    /**
+     * Live front-passenger seat occupancy snapshot from Gen5W HSCAN & SYSTEM services:
+     *  - HSCAN.getOccupancy: 1 = unoccupied / solo driver, 2 = front passenger occupied
+     *  - SYS.getClassStatus: 1 = ODS empty, 2 = adult occupant classified on passenger mat
+     *  - HSCAN.getAsstStBltSwSta: 0 = unbuckled, 1 = front-passenger belt buckled
+     *  - HSCAN.getPassStOccSta: 1 = occupied on trims exposing direct SBR mat flag
+     */
+    public static final class PassengerPresence {
+        public static final PassengerPresence UNAVAILABLE =
+                new PassengerPresence(false, false, -1, -1, -1, -1);
+
+        public final boolean available;
+        public final boolean occupied;
+        public final int hscanOccupancy;
+        public final int sysClassStatus;
+        public final int asstBelt;
+        public final int passStOcc;
+
+        public PassengerPresence(
+                boolean available,
+                boolean occupied,
+                int hscanOccupancy,
+                int sysClassStatus,
+                int asstBelt,
+                int passStOcc) {
+            this.available = available;
+            this.occupied = occupied;
+            this.hscanOccupancy = hscanOccupancy;
+            this.sysClassStatus = sysClassStatus;
+            this.asstBelt = asstBelt;
+            this.passStOcc = passStOcc;
+        }
+
+        public static PassengerPresence fromRaw(
+                int hscanOccupancy, int sysClassStatus, int asstBelt, int passStOcc) {
+            boolean occupied = (hscanOccupancy == 2)
+                    || (sysClassStatus == 2)
+                    || (passStOcc == 1)
+                    || (asstBelt == 1);
+            boolean matReporting = (hscanOccupancy >= 1 && hscanOccupancy <= 14)
+                    || (sysClassStatus >= 1 && sysClassStatus <= 14);
+            boolean available = occupied || matReporting;
+            return new PassengerPresence(
+                    available, occupied, hscanOccupancy, sysClassStatus, asstBelt, passStOcc);
+        }
+
+        public static PassengerPresence fromSignalMap(Map<String, String> m) {
+            if (m == null || m.isEmpty()) return UNAVAILABLE;
+            return fromRaw(
+                    parseRawInt(m.get("HSCAN.getOccupancy")),
+                    parseRawInt(m.get("SYS.getClassStatus")),
+                    parseRawInt(m.get("HSCAN.getAsstStBltSwSta")),
+                    parseRawInt(m.get("HSCAN.getPassStOccSta")));
+        }
+
+        public String encode() {
+            return (available ? "1" : "0") + ","
+                    + (occupied ? "1" : "0") + ","
+                    + hscanOccupancy + ","
+                    + sysClassStatus + ","
+                    + asstBelt + ","
+                    + passStOcc;
+        }
+
+        public static PassengerPresence decode(String wire) {
+            if (wire == null || wire.isEmpty()) return UNAVAILABLE;
+            String[] p = wire.trim().split(",");
+            if (p.length < 6) return UNAVAILABLE;
+            return new PassengerPresence(
+                    "1".equals(p[0]),
+                    "1".equals(p[1]),
+                    parseRawInt(p[2]),
+                    parseRawInt(p[3]),
+                    parseRawInt(p[4]),
+                    parseRawInt(p[5]));
+        }
+
+        public String summary() {
+            if (!available) return "sensor unavailable";
+            return (occupied ? "occupied" : "empty")
+                    + " (occ=" + hscanOccupancy
+                    + ", ods=" + sysClassStatus
+                    + ", belt=" + asstBelt + ")";
+        }
+
+        private static int parseRawInt(String s) {
+            if (s == null || s.isEmpty()) return -1;
+            try {
+                return Integer.parseInt(s.trim());
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
     }
 
     public static final class UiState {
@@ -96,20 +192,26 @@ public final class OccupantSignalProbe {
     };
 
     private static final String[] OCCUPANT_PRIORITY_TOKENS = {
-        "seat", "ast", "psg", "pass", "drv", "driver", "front", "rear",
+        "seat", "asst", "psg", "pass", "drv", "driver", "front", "rear",
         "rl_", "rr_", "fl_", "fr_", "rlseat", "rrseat", "2nd", "row",
-        "belt", "sbr", "buckle", "occup", "ocs", "mat", "weight",
+        "belt", "stblt", "sbr", "buckle", "occup", "ocs", "classstatus", "mat", "weight",
         "airbag", "pab", "srs", "telltale",
         "door", "dr_", "ajar", "latch", "lock", "trunk", "tailgate", "hood",
         "roa", "child", "presence", "person", "ultrasonic", "cabin"
     };
 
+    private static final String[] OCCUPANT_PRIORITY_WORDS = {
+        "ast", "asst", "ods"
+    };
+
     private static final String[] NOISY_COUNTER_TOKENS = {
         "odometer", "drivetime", "idletime", "runtime", "runningtime",
-        "carspeed", "car_speed", "sasangle", "steering", "cylprsr", "accelpdl",
-        "longaccel", "lataccel", "yawrate", "whlspd", "wheelspd",
+        "carspeed", "car_speed", "speeddist", "sasangle", "sasspd", "steering",
+        "cylprsr", "accelpdl", "longaccel", "lataccel", "yawrate", "whlspd", "wheelspd",
         "ambienttemp", "outtemp", "battemp", "celltemp", "coolant",
-        "remaintime", "remaindis", "abletodrive"
+        "remaintime", "remaindis", "abletodrive",
+        "gettime", "getheading", "clmtpwrcnsmptn", "clmtpwrsum", "pwr_other_ecu",
+        "energymap_1000ms", "added_dist_datc", "ldc_loadpwrsum"
     };
 
     private final SignalSource source;
@@ -141,6 +243,15 @@ public final class OccupantSignalProbe {
     public OccupantSignalProbe(SignalSource source, String modeLabel) {
         this.source = source == null ? new ReflectionGen5wSignalSource() : source;
         this.modeLabel = (modeLabel == null || modeLabel.isEmpty()) ? "probe" : modeLabel;
+    }
+
+    public PassengerPresence readPassengerPresence() {
+        try {
+            PassengerPresence p = source.readPassengerPresence();
+            return p == null ? PassengerPresence.UNAVAILABLE : p;
+        } catch (Throwable t) {
+            return PassengerPresence.UNAVAILABLE;
+        }
     }
 
     public boolean isAutoCaptureActive() {
@@ -658,7 +769,19 @@ public final class OccupantSignalProbe {
     }
 
     public static boolean isOccupantCandidate(String key) {
-        return matchesAnyToken(key, OCCUPANT_PRIORITY_TOKENS);
+        if (matchesAnyToken(key, OCCUPANT_PRIORITY_TOKENS)) {
+            return true;
+        }
+        List<String> words = tokenizeIdentifier(key);
+        for (int i = 0; i < words.size(); i++) {
+            String w = words.get(i);
+            for (int j = 0; j < OCCUPANT_PRIORITY_WORDS.length; j++) {
+                if (OCCUPANT_PRIORITY_WORDS[j].equals(w)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     static boolean matchesAnyToken(String text, String[] tokens) {
@@ -820,7 +943,11 @@ public final class OccupantSignalProbe {
             DataInputStream in = new DataInputStream(new BufferedInputStream(client.getInputStream(), 1024));
             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(client.getOutputStream(), 4096));
             String cmd = readFrame(in);
-            if ("UI_POLL".equals(cmd)) {
+            if ("OCCUPANCY".equals(cmd)) {
+                PassengerPresence p = probe.readPassengerPresence();
+                writeFrame(out, p.encode());
+                out.flush();
+            } else if ("UI_POLL".equals(cmd)) {
                 boolean full = "1".equals(readFrame(in));
                 String hmgSummary = readFrame(in);
                 UiState ui = probe.snapshotUi(true, full, hmgSummary);
@@ -881,6 +1008,23 @@ public final class OccupantSignalProbe {
                 return true;
             } catch (IOException e) {
                 return false;
+            } finally {
+                try { s.close(); } catch (Throwable ignored) {}
+            }
+        }
+
+        public PassengerPresence queryPassengerPresence() {
+            Socket s = new Socket();
+            try {
+                s.connect(new InetSocketAddress("127.0.0.1", port), 300);
+                s.setSoTimeout(1200);
+                DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 128));
+                DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 256));
+                writeFrame(out, "OCCUPANCY");
+                out.flush();
+                return PassengerPresence.decode(readFrame(in));
+            } catch (Throwable ignored) {
+                return fallbackProbe.readPassengerPresence();
             } finally {
                 try { s.close(); } catch (Throwable ignored) {}
             }
@@ -1002,6 +1146,11 @@ public final class OccupantSignalProbe {
         private final List<BoundStatusObject> statusObjects = new ArrayList<BoundStatusObject>();
         private final List<String> signatures = new ArrayList<String>();
 
+        private BoundGetter bgHscanOccupancy;
+        private BoundGetter bgSysClassStatus;
+        private BoundGetter bgAsstBelt;
+        private BoundGetter bgPassStOcc;
+
         private String statusText = "uninitialized";
         private String buildText = "unknown";
 
@@ -1021,6 +1170,31 @@ public final class OccupantSignalProbe {
         public synchronized List<String> signatureInventory() {
             ensureInitialized();
             return new ArrayList<String>(signatures);
+        }
+
+        @Override
+        public synchronized PassengerPresence readPassengerPresence() {
+            ensureInitialized();
+            int occ = invokeIntGetter(bgHscanOccupancy, -1);
+            int cls = invokeIntGetter(bgSysClassStatus, -1);
+            int belt = invokeIntGetter(bgAsstBelt, -1);
+            int passOcc = invokeIntGetter(bgPassStOcc, -1);
+            return PassengerPresence.fromRaw(occ, cls, belt, passOcc);
+        }
+
+        private static int invokeIntGetter(BoundGetter bg, int fallback) {
+            if (bg == null) return fallback;
+            try {
+                Object v = bg.method.invoke(bg.target);
+                if (v instanceof Number) {
+                    return ((Number) v).intValue();
+                }
+                if (v instanceof Boolean) {
+                    return ((Boolean) v).booleanValue() ? 1 : 0;
+                }
+            } catch (Throwable ignored) {
+            }
+            return fallback;
         }
 
         @Override
@@ -1098,6 +1272,10 @@ public final class OccupantSignalProbe {
             allGetters.clear();
             statusObjects.clear();
             signatures.clear();
+            bgHscanOccupancy = null;
+            bgSysClassStatus = null;
+            bgAsstBelt = null;
+            bgPassStOcc = null;
             buildText = readSanitizedBuildInfo();
 
             try {
@@ -1318,6 +1496,15 @@ public final class OccupantSignalProbe {
                 added++;
                 if ("BCM".equals(prefix) || "HSCAN".equals(prefix) || isOccupantCandidate(key)) {
                     fastGetters.add(bg);
+                }
+                if ("HSCAN.getOccupancy".equals(key)) {
+                    bgHscanOccupancy = bg;
+                } else if ("SYS.getClassStatus".equals(key)) {
+                    bgSysClassStatus = bg;
+                } else if ("HSCAN.getAsstStBltSwSta".equals(key)) {
+                    bgAsstBelt = bg;
+                } else if ("HSCAN.getPassStOccSta".equals(key)) {
+                    bgPassStOcc = bg;
                 }
             }
 

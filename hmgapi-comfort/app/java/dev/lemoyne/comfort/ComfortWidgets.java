@@ -283,8 +283,9 @@ final class ComfortWidgets {
         }
     }
 
-    /** Live cabin seat tile showing seat title, active state label, and 3-pip heat/vent bars. */
+    /** Live cabin seat tile showing seat title, optional occupancy badge, active state label, and 3-pip bars. */
     static final class SeatTileView extends LinearLayout {
+        private final TextView badgeLabel;
         private final TextView stateLabel;
         private final PipsView pips;
         private final float d;
@@ -298,13 +299,25 @@ final class ComfortWidgets {
             int pH = dp(c, 11), pV = dp(c, 9);
             setPadding(pH, pV, pH, pV);
 
+            LinearLayout top = new LinearLayout(c);
+            top.setOrientation(HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+
             TextView title = new TextView(c);
             title.setText(seatTitle);
             title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
             title.setTypeface(Typeface.DEFAULT_BOLD);
             title.setTextColor(ON_SURFACE);
             title.setSingleLine(true);
-            addView(title);
+            top.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            badgeLabel = new TextView(c);
+            badgeLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+            badgeLabel.setTypeface(Typeface.DEFAULT_BOLD);
+            badgeLabel.setSingleLine(true);
+            badgeLabel.setVisibility(View.GONE);
+            top.addView(badgeLabel);
+            addView(top);
 
             LinearLayout bottom = new LinearLayout(c);
             bottom.setOrientation(HORIZONTAL);
@@ -322,6 +335,17 @@ final class ComfortWidgets {
             addView(bottom, bp);
 
             update(0, 0);
+        }
+
+        void setBadge(String text, int color) {
+            if (text == null || text.isEmpty()) {
+                badgeLabel.setText("");
+                badgeLabel.setVisibility(View.GONE);
+            } else {
+                badgeLabel.setText(text);
+                badgeLabel.setTextColor(color);
+                badgeLabel.setVisibility(View.VISIBLE);
+            }
         }
 
         /** mode: 0 = off, 1 = heat (1..3), 2 = vent (1..3) */
