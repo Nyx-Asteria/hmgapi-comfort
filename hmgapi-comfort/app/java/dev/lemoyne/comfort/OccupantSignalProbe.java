@@ -46,12 +46,24 @@ public final class OccupantSignalProbe {
     private static final int MAX_HISTORY_STEPS = 8;
     private static final long AUTO_CAPTURE_WINDOW_MS = 10L * 60L * 1000L;
 
+    public interface PushTelemetrySource {
+        void onWake();
+        void ensure(boolean ignOn);
+        String outsideTempF();
+        String outsideTempC();
+        String wheelHeat();
+        boolean isDatcSentinel();
+    }
+
     public interface SignalSource {
         String serviceStatusSummary();
         String deviceBuildSummary();
         List<String> signatureInventory();
         Map<String, String> readSignals(boolean fullScan);
         PassengerPresence readPassengerPresence();
+        CabinState readCabinState();
+        int readMobisSleepingFast();
+        void onWake();
     }
 
     /**
@@ -139,13 +151,151 @@ public final class OccupantSignalProbe {
                     + ", belt=" + asstBelt + ")";
         }
 
-        private static int parseRawInt(String s) {
+        static int parseRawInt(String s) {
             if (s == null || s.isEmpty()) return -1;
             try {
                 return Integer.parseInt(s.trim());
             } catch (NumberFormatException e) {
                 return -1;
             }
+        }
+    }
+
+    /**
+     * Combined UID-1000 cabin, ignition, display-standby, and push-listener fallback snapshot:
+     *  - passenger: front-passenger occupancy & buckle state
+     *  - outsideTempF / outsideTempC / wheelHeat: fresh Binder listener push values when HMG-API hub is "-"
+     *  - ignOn: BCM.getIGNStatus (1 = Ignition ON, 0 = ACC/OFF, -1 = unknown)
+     *  - ign3On: DATC.isIGN3Status (1 = IGN3 active during charging/utility/ready, 0 = OFF, -1 = unknown)
+     *  - avAwake: 1 = display & AV active, 0 = BlackScreen / AV-Off / Display-Off, -1 = unknown
+     *  - mobisSleeping: 1 = Mobis BlackScreen or AV-Off QuickBoot standby, 0 = awake, -1 = unknown
+     *  - datcSentinel: true when DATC pushed -40.0 F raw-zero sentinel (unpowered IG1/ACC)
+     */
+    public static final class CabinState {
+        public static final CabinState UNAVAILABLE = new CabinState(
+                PassengerPresence.UNAVAILABLE, "-", "-", "-", -1, -1, -1, -1, false);
+
+        public final PassengerPresence passenger;
+        public final String outsideTempF;
+        public final String outsideTempC;
+        public final String wheelHeat;
+        public final int ignOn;
+        public final int ign3On;
+        public final int avAwake;
+        public final int mobisSleeping;
+        public final boolean datcSentinel;
+
+        public CabinState(
+                PassengerPresence passenger,
+                String outsideTempF,
+                String outsideTempC,
+                String wheelHeat,
+                int ignOn,
+                int ign3On,
+                int avAwake,
+                int mobisSleeping,
+                boolean datcSentinel) {
+            this.passenger = passenger == null ? PassengerPresence.UNAVAILABLE : passenger;
+            this.outsideTempF = normField(outsideTempF);
+            this.outsideTempC = normField(outsideTempC);
+            this.wheelHeat = normField(wheelHeat);
+            this.ignOn = ignOn;
+            this.ign3On = ign3On;
+            this.avAwake = avAwake;
+            this.mobisSleeping = mobisSleeping;
+            this.datcSentinel = datcSentinel;
+        }
+
+        public static int computeAvAwake(int blackScreen, int avPowerOff, int displayOffMode) {
+            if (blackScreen == 1 || avPowerOff == 1 || displayOffMode == 1) {
+                return 0;
+            }
+            if (blackScreen == 0 || avPowerOff == 0 || displayOffMode == 0) {
+                return 1;
+            }
+            return -1;
+        }
+
+        public static int computeMobisSleeping(int blackScreen, int avPowerOff) {
+            if (blackScreen == 1 || avPowerOff == 1) {
+                return 1;
+            }
+            if (blackScreen == 0 || avPowerOff == 0) {
+                return 0;
+            }
+            return -1;
+        }
+
+        public static CabinState fromSignalMap(Map<String, String> m) {
+            if (m == null || m.isEmpty()) return UNAVAILABLE;
+            int black = parseTriState(m.get("BLACKSCREEN.isBlackScreenShown"));
+            int avOff = parseTriState(m.get("POWER.isAvPowerOff"));
+            int dispOff = parseTriState(m.get("POWER.isDisplayOffMode"));
+            return new CabinState(
+                    PassengerPresence.fromSignalMap(m),
+                    m.get("PUSH.outside_temp_f"),
+                    m.get("PUSH.outside_temp"),
+                    m.get("PUSH.wheel_heat"),
+                    parseTriState(m.get("BCM.getIGNStatus")),
+                    parseTriState(m.get("DATC.isIGN3Status")),
+                    computeAvAwake(black, avOff, dispOff),
+                    computeMobisSleeping(black, avOff),
+                    parseTriState(m.get("PUSH.datc_sentinel")) == 1);
+        }
+
+        public String encode() {
+            return passenger.encode() + "\t"
+                    + outsideTempF + "\t"
+                    + outsideTempC + "\t"
+                    + wheelHeat + "\t"
+                    + ignOn + "\t"
+                    + ign3On + "\t"
+                    + avAwake + "\t"
+                    + mobisSleeping + "\t"
+                    + (datcSentinel ? "1" : "0");
+        }
+
+        public static CabinState decode(String wire) {
+            if (wire == null || wire.isEmpty()) return UNAVAILABLE;
+            String[] p = wire.split("\t", -1);
+            if (p.length < 9) return UNAVAILABLE;
+            return new CabinState(
+                    PassengerPresence.decode(p[0]),
+                    p[1],
+                    p[2],
+                    p[3],
+                    PassengerPresence.parseRawInt(p[4]),
+                    PassengerPresence.parseRawInt(p[5]),
+                    PassengerPresence.parseRawInt(p[6]),
+                    PassengerPresence.parseRawInt(p[7]),
+                    "1".equals(p[8].trim()));
+        }
+
+        public String summary() {
+            return "ign=" + triName(ignOn)
+                    + " ign3=" + triName(ign3On)
+                    + " av_awake=" + triName(avAwake)
+                    + " push_temp_f=" + outsideTempF
+                    + (datcSentinel ? "(sentinel)" : "")
+                    + " push_wheel=" + wheelHeat;
+        }
+
+        private static String normField(String s) {
+            if (s == null) return "-";
+            String t = s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
+            return t.isEmpty() ? "-" : t;
+        }
+
+        static int parseTriState(String s) {
+            if (s == null) return -1;
+            String t = s.trim();
+            if ("1".equals(t) || "true".equalsIgnoreCase(t)) return 1;
+            if ("0".equals(t) || "false".equalsIgnoreCase(t)) return 0;
+            return -1;
+        }
+
+        private static String triName(int v) {
+            return v == 1 ? "1" : (v == 0 ? "0" : "-");
         }
     }
 
@@ -251,6 +401,30 @@ public final class OccupantSignalProbe {
             return p == null ? PassengerPresence.UNAVAILABLE : p;
         } catch (Throwable t) {
             return PassengerPresence.UNAVAILABLE;
+        }
+    }
+
+    public CabinState readCabinState() {
+        try {
+            CabinState c = source.readCabinState();
+            return c == null ? CabinState.UNAVAILABLE : c;
+        } catch (Throwable t) {
+            return CabinState.UNAVAILABLE;
+        }
+    }
+
+    public int readMobisSleepingFast() {
+        try {
+            return source.readMobisSleepingFast();
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    public void onWake() {
+        try {
+            source.onWake();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -947,6 +1121,14 @@ public final class OccupantSignalProbe {
                 PassengerPresence p = probe.readPassengerPresence();
                 writeFrame(out, p.encode());
                 out.flush();
+            } else if ("CABIN_STATE".equals(cmd)) {
+                CabinState c = probe.readCabinState();
+                writeFrame(out, c.encode());
+                out.flush();
+            } else if ("WAKE".equals(cmd)) {
+                probe.onWake();
+                writeFrame(out, "1");
+                out.flush();
             } else if ("UI_POLL".equals(cmd)) {
                 boolean full = "1".equals(readFrame(in));
                 String hmgSummary = readFrame(in);
@@ -1025,6 +1207,40 @@ public final class OccupantSignalProbe {
                 return PassengerPresence.decode(readFrame(in));
             } catch (Throwable ignored) {
                 return fallbackProbe.readPassengerPresence();
+            } finally {
+                try { s.close(); } catch (Throwable ignored) {}
+            }
+        }
+
+        public CabinState queryCabinState() {
+            Socket s = new Socket();
+            try {
+                s.connect(new InetSocketAddress("127.0.0.1", port), 350);
+                s.setSoTimeout(1600);
+                DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 128));
+                DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 512));
+                writeFrame(out, "CABIN_STATE");
+                out.flush();
+                return CabinState.decode(readFrame(in));
+            } catch (Throwable ignored) {
+                return fallbackProbe.readCabinState();
+            } finally {
+                try { s.close(); } catch (Throwable ignored) {}
+            }
+        }
+
+        public void notifyWake() {
+            Socket s = new Socket();
+            try {
+                s.connect(new InetSocketAddress("127.0.0.1", port), 300);
+                s.setSoTimeout(1000);
+                DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 64));
+                DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 64));
+                writeFrame(out, "WAKE");
+                out.flush();
+                readFrame(in);
+            } catch (Throwable ignored) {
+                fallbackProbe.onWake();
             } finally {
                 try { s.close(); } catch (Throwable ignored) {}
             }
@@ -1134,6 +1350,9 @@ public final class OccupantSignalProbe {
 
         private static final String HCAN_JAR = "/system/framework/com.hkmc.ext.hcan.jar";
 
+        private final PushTelemetrySource pushSource;
+        private boolean pushAwake = true;
+
         private boolean initialized;
         private boolean coreServicesReady;
         private long lastInitAttemptMs;
@@ -1150,9 +1369,22 @@ public final class OccupantSignalProbe {
         private BoundGetter bgSysClassStatus;
         private BoundGetter bgAsstBelt;
         private BoundGetter bgPassStOcc;
+        private BoundGetter bgBcmIgnStatus;
+        private BoundGetter bgDatcIgn3Status;
+        private BoundGetter bgBlackScreenShown;
+        private BoundGetter bgAvPowerOff;
+        private BoundGetter bgDisplayOffMode;
 
         private String statusText = "uninitialized";
         private String buildText = "unknown";
+
+        ReflectionGen5wSignalSource() {
+            this(null);
+        }
+
+        ReflectionGen5wSignalSource(PushTelemetrySource pushSource) {
+            this.pushSource = pushSource;
+        }
 
         @Override
         public synchronized String serviceStatusSummary() {
@@ -1180,6 +1412,79 @@ public final class OccupantSignalProbe {
             int belt = invokeIntGetter(bgAsstBelt, -1);
             int passOcc = invokeIntGetter(bgPassStOcc, -1);
             return PassengerPresence.fromRaw(occ, cls, belt, passOcc);
+        }
+
+        @Override
+        public CabinState readCabinState() {
+            PassengerPresence passenger;
+            int ignOn;
+            int ign3On;
+            int avAwake;
+            int mobisSleeping;
+            boolean sleepStandby;
+            boolean unregisterSleep = false;
+            synchronized (this) {
+                ensureInitialized();
+                int occ = invokeIntGetter(bgHscanOccupancy, -1);
+                int cls = invokeIntGetter(bgSysClassStatus, -1);
+                int belt = invokeIntGetter(bgAsstBelt, -1);
+                int passOcc = invokeIntGetter(bgPassStOcc, -1);
+                passenger = PassengerPresence.fromRaw(occ, cls, belt, passOcc);
+
+                ignOn = invokeIntGetter(bgBcmIgnStatus, -1);
+                ign3On = invokeIntGetter(bgDatcIgn3Status, -1);
+                int black = invokeIntGetter(bgBlackScreenShown, -1);
+                int avOff = invokeIntGetter(bgAvPowerOff, -1);
+                int dispOff = invokeIntGetter(bgDisplayOffMode, -1);
+                avAwake = CabinState.computeAvAwake(black, avOff, dispOff);
+                mobisSleeping = CabinState.computeMobisSleeping(black, avOff);
+
+                sleepStandby = (mobisSleeping == 1 && ignOn != 1);
+                if (sleepStandby && pushAwake) {
+                    pushAwake = false;
+                    unregisterSleep = true;
+                } else if (!sleepStandby && !pushAwake) {
+                    pushAwake = true;
+                }
+            }
+
+            String tempF = "-";
+            String tempC = "-";
+            String wheel = "-";
+            boolean sentinel = false;
+            if (pushSource != null) {
+                if (sleepStandby) {
+                    if (unregisterSleep) {
+                        pushSource.onWake();
+                    }
+                } else {
+                    pushSource.ensure(ignOn == 1);
+                    tempF = pushSource.outsideTempF();
+                    tempC = pushSource.outsideTempC();
+                    wheel = pushSource.wheelHeat();
+                    sentinel = pushSource.isDatcSentinel();
+                }
+            }
+            return new CabinState(
+                    passenger, tempF, tempC, wheel, ignOn, ign3On, avAwake, mobisSleeping, sentinel);
+        }
+
+        @Override
+        public synchronized int readMobisSleepingFast() {
+            ensureInitialized();
+            int black = invokeIntGetter(bgBlackScreenShown, -1);
+            int avOff = invokeIntGetter(bgAvPowerOff, -1);
+            return CabinState.computeMobisSleeping(black, avOff);
+        }
+
+        @Override
+        public void onWake() {
+            synchronized (this) {
+                pushAwake = true;
+            }
+            if (pushSource != null) {
+                pushSource.onWake();
+            }
         }
 
         private static int invokeIntGetter(BoundGetter bg, int fallback) {
@@ -1276,6 +1581,11 @@ public final class OccupantSignalProbe {
             bgSysClassStatus = null;
             bgAsstBelt = null;
             bgPassStOcc = null;
+            bgBcmIgnStatus = null;
+            bgDatcIgn3Status = null;
+            bgBlackScreenShown = null;
+            bgAvPowerOff = null;
+            bgDisplayOffMode = null;
             buildText = readSanitizedBuildInfo();
 
             try {
@@ -1494,7 +1804,12 @@ public final class OccupantSignalProbe {
                 BoundGetter bg = new BoundGetter(key, serviceInstance, e.getValue());
                 allGetters.add(bg);
                 added++;
-                if ("BCM".equals(prefix) || "HSCAN".equals(prefix) || isOccupantCandidate(key)) {
+                if ("BCM".equals(prefix)
+                        || "HSCAN".equals(prefix)
+                        || "BLACKSCREEN".equals(prefix)
+                        || "POWER".equals(prefix)
+                        || "DATC.isIGN3Status".equals(key)
+                        || isOccupantCandidate(key)) {
                     fastGetters.add(bg);
                 }
                 if ("HSCAN.getOccupancy".equals(key)) {
@@ -1505,6 +1820,16 @@ public final class OccupantSignalProbe {
                     bgAsstBelt = bg;
                 } else if ("HSCAN.getPassStOccSta".equals(key)) {
                     bgPassStOcc = bg;
+                } else if ("BCM.getIGNStatus".equals(key)) {
+                    bgBcmIgnStatus = bg;
+                } else if ("DATC.isIGN3Status".equals(key)) {
+                    bgDatcIgn3Status = bg;
+                } else if ("BLACKSCREEN.isBlackScreenShown".equals(key)) {
+                    bgBlackScreenShown = bg;
+                } else if ("POWER.isAvPowerOff".equals(key)) {
+                    bgAvPowerOff = bg;
+                } else if ("POWER.isDisplayOffMode".equals(key)) {
+                    bgDisplayOffMode = bg;
                 }
             }
 

@@ -24,6 +24,7 @@ has "apk contains ComfortIcons" "Ldev/lemoyne/comfort/ComfortIcons;" "$DEX_STRIN
 has "apk contains ComfortWidgets" "Ldev/lemoyne/comfort/ComfortWidgets;" "$DEX_STRINGS"
 has "apk contains BootReceiver" "Ldev/lemoyne/comfort/BootReceiver;" "$DEX_STRINGS"
 has "apk contains OccupantSignalProbe" "Ldev/lemoyne/comfort/OccupantSignalProbe;" "$DEX_STRINGS"
+has "apk contains CabinPushBridge" "Ldev/lemoyne/comfort/CabinPushBridge;" "$DEX_STRINGS"
 has "apk contains ComfortUsbExporter" "Ldev/lemoyne/comfort/ComfortUsbExporter;" "$DEX_STRINGS"
 has "apk bundles HmgApi client" "Lhmgapi/client/HmgApi;" "$DEX_STRINGS"
 

@@ -3,6 +3,7 @@ package dev.lemoyne.comfort;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -78,6 +79,39 @@ public final class ComfortPolicy {
         } catch (NumberFormatException e) {
             return Float.NaN;
         }
+    }
+
+    /**
+     * Fills missing ("-") push-only vehicle readings ({@code outside_temp_f}, {@code outside_temp},
+     * {@code wheel_heat}) from {@link OccupantSignalProbe.CabinState}'s fresh Binder push bridge
+     * when HMG-API's {@code vehicle} hub has cleared them after a QuickBoot wake.
+     */
+    public static Map<String, String> mergeCabinFallback(
+            Map<String, String> readings, OccupantSignalProbe.CabinState cabin) {
+        Map<String, String> out = new LinkedHashMap<String, String>();
+        if (readings != null) {
+            out.putAll(readings);
+        }
+        if (cabin == null) {
+            return out;
+        }
+        if (Float.isNaN(parseAmbientF(out.get("outside_temp_f")))
+                && !Float.isNaN(parseAmbientF(cabin.outsideTempF))) {
+            out.put("outside_temp_f", cabin.outsideTempF);
+            String curC = out.get("outside_temp");
+            if ((curC == null || curC.isEmpty() || "-".equals(curC))
+                    && cabin.outsideTempC != null
+                    && !cabin.outsideTempC.isEmpty()
+                    && !"-".equals(cabin.outsideTempC)) {
+                out.put("outside_temp", cabin.outsideTempC);
+            }
+        }
+        String curWheel = out.get("wheel_heat");
+        if ((curWheel == null || curWheel.isEmpty() || "-".equals(curWheel))
+                && ("0".equals(cabin.wheelHeat) || "1".equals(cabin.wheelHeat))) {
+            out.put("wheel_heat", cabin.wheelHeat);
+        }
+        return out;
     }
 
     public static Plan evaluateClimate(ComfortConfig cfg, float tempF, Map<String, String> readings) {
@@ -294,11 +328,37 @@ public final class ComfortPolicy {
      *        - BCM seat climate powered and ready (seat_state.driver in 2..8).
      */
     public static boolean isActiveClimateSession(Map<String, String> readings, boolean screenInteractive) {
+        return isActiveClimateSession(readings, screenInteractive, -1);
+    }
+
+    /**
+     * Ignition-aware overload for plugged-in / Utility Mode cabin sessions: triggers immediately
+     * when {@code BCM.getIGNStatus == true} ({@code ignOn == 1}) or BCM seat climate is powered
+     * ({@code seat_state.driver} in {@code 2..8}), while staying silent in ACC standby ({@code ignOn == 0}).
+     */
+    public static boolean isActiveClimateSession(
+            Map<String, String> readings, boolean screenInteractive, int ignOn) {
         if (readings == null) return false;
         if ("1".equals(readings.get("hv.ready"))) return true;
         return screenInteractive
                 && "1".equals(readings.get("gear.park"))
-                && isBcmSeatClimateReady(readings);
+                && (isBcmSeatClimateReady(readings) || ignOn == 1);
+    }
+
+    /**
+     * True when the car is plugged in and charging in Park with the display awake, but the driver
+     * entered ACC mode (e.g. pressed Brake + Start while tethered on E-GMP) where BCM Ignition
+     * ({@code IG2}) is off and seat/wheel heaters are unpowered until Start is pressed without brake.
+     */
+    public static boolean isPluggedInAccStandby(
+            Map<String, String> readings, boolean screenInteractive, int ignOn) {
+        if (readings == null) return false;
+        if ("1".equals(readings.get("hv.ready"))) return false;
+        return screenInteractive
+                && "1".equals(readings.get("gear.park"))
+                && isChargingActive(readings)
+                && !isBcmSeatClimateReady(readings)
+                && ignOn != 1;
     }
 
     /**
@@ -402,12 +462,19 @@ public final class ComfortPolicy {
 
         /** Returns true when a new EV_RDY drive or powered cabin session needs auto-climate evaluation. */
         public synchronized boolean shouldTrigger(Map<String, String> readings, boolean screenInteractive) {
-            if (isActiveClimateSession(readings, screenInteractive)) {
+            return shouldTrigger(readings, screenInteractive, -1);
+        }
+
+        public synchronized boolean shouldTrigger(
+                Map<String, String> readings, boolean screenInteractive, int ignOn) {
+            if (isActiveClimateSession(readings, screenInteractive, ignOn)) {
                 offTicks = 0;
                 return !appliedThisDrive;
             }
             String hvReady = readings == null ? null : readings.get("hv.ready");
-            if ("0".equals(hvReady) && !isBcmSeatClimateReady(readings)) {
+            if (("0".equals(hvReady) || ignOn == 0)
+                    && !isBcmSeatClimateReady(readings)
+                    && ignOn != 1) {
                 offTicks++;
                 if (offTicks >= 2) {
                     appliedThisDrive = false;
@@ -421,7 +488,7 @@ public final class ComfortPolicy {
             Map<String, String> m = "1".equals(hvReady) || "0".equals(hvReady)
                     ? Collections.singletonMap("hv.ready", hvReady)
                     : Collections.<String, String>emptyMap();
-            return shouldTrigger(m, false);
+            return shouldTrigger(m, false, -1);
         }
 
         public synchronized boolean isCompleted() {
@@ -467,12 +534,21 @@ public final class ComfortPolicy {
                 Map<String, String> readings,
                 boolean screenInteractive,
                 OccupantSignalProbe.PassengerPresence presence) {
+            return shouldTriggerLateBoarding(cfg, readings, screenInteractive, -1, presence);
+        }
+
+        public synchronized boolean shouldTriggerLateBoarding(
+                ComfortConfig cfg,
+                Map<String, String> readings,
+                boolean screenInteractive,
+                int ignOn,
+                OccupantSignalProbe.PassengerPresence presence) {
             if (!sessionReady
                     || cfg == null
                     || !cfg.climateEnabled
                     || !cfg.passengerAutoDetect
                     || ComfortConfig.POLICY_OFF.equals(cfg.passengerPolicy)
-                    || !isActiveClimateSession(readings, screenInteractive)
+                    || !isActiveClimateSession(readings, screenInteractive, ignOn)
                     || presence == null
                     || !presence.available) {
                 return false;

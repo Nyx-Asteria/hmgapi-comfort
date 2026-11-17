@@ -27,6 +27,7 @@ public final class WelcomeDaemon {
     private static final File WAKE_FILE = new File("/data/hmgapi/public/wake");
 
     private static Method getPropMethod;
+    private static volatile OccupantSignalProbe activeProbe;
     private static boolean welcomeDismiss = true;
     private static int welcomeDelayMs = 0;
     private static long lastStateMtime = -1L;
@@ -46,7 +47,7 @@ public final class WelcomeDaemon {
         long lastWakeSeq = readWakeSeq();
         long lastEnsureMs = 0L;
 
-        ensureComfortServiceAsync();
+        ensureComfortServiceAsync(false);
         lastEnsureMs = SystemClock.elapsedRealtime();
         startProbeServer();
 
@@ -56,10 +57,13 @@ public final class WelcomeDaemon {
         }
 
         // Re-ensure ComfortService after cold-boot ModApps.sync finishes any APK install/update
-        ensureComfortServiceAsync();
+        ensureComfortServiceAsync(false);
         lastEnsureMs = SystemClock.elapsedRealtime();
 
-        // 2. Resident QuickBoot STR, wake.sh, and ComfortService watchdog (150 ms wake response)
+        int mobisTick = 0;
+        int lastMobisSleeping = activeProbe == null ? -1 : activeProbe.readMobisSleepingFast();
+
+        // 2. Resident QuickBoot STR, wake.sh, Mobis BlackScreen/AV-Off, and ComfortService watchdog
         while (true) {
             sleepQuietly(150);
             refreshSettings(false);
@@ -72,18 +76,45 @@ public final class WelcomeDaemon {
             lastSleepGap = gap;
             lastWakeSeq = wakeSeq;
 
-            if (gapWoke || seqWoke) {
-                ensureComfortServiceAsync();
+            boolean mobisWoke = false;
+            mobisTick++;
+            if (mobisTick >= 10) {
+                mobisTick = 0;
+                OccupantSignalProbe p = activeProbe;
+                int ms = p == null ? -1 : p.readMobisSleepingFast();
+                if (ms == 0 || ms == 1) {
+                    if (lastMobisSleeping == 1 && ms == 0) {
+                        mobisWoke = true;
+                    } else if (lastMobisSleeping == 0 && ms == 1 && p != null) {
+                        p.onWake();
+                    }
+                    lastMobisSleeping = ms;
+                }
+            }
+
+            if (gapWoke || seqWoke || mobisWoke) {
+                OccupantSignalProbe p = activeProbe;
+                if (p != null) {
+                    p.onWake();
+                }
+                ensureComfortServiceAsync(true);
                 lastEnsureMs = now;
                 if (welcomeDismiss) {
-                    dismissWithRetry(gapWoke ? "quickboot-gap" : "wake-hook", false);
+                    String trigger = gapWoke ? "quickboot-gap" : (seqWoke ? "wake-hook" : "mobis-wake");
+                    dismissWithRetry(trigger, false);
                     // Re-baseline after dismissal in case time advanced during retries
                     lastSleepGap = currentSleepGap();
                     lastWakeSeq = readWakeSeq();
+                    if (p != null) {
+                        int msAfter = p.readMobisSleepingFast();
+                        if (msAfter == 0 || msAfter == 1) {
+                            lastMobisSleeping = msAfter;
+                        }
+                    }
                 }
             } else if (now - lastEnsureMs >= 30000L) {
                 lastEnsureMs = now;
-                ensureComfortServiceAsync();
+                ensureComfortServiceAsync(false);
             }
         }
     }
@@ -149,7 +180,7 @@ public final class WelcomeDaemon {
         log("welcome fast-path (" + trigger + "): timed out waiting for vehicle hub / Park");
     }
 
-    private static void ensureComfortServiceAsync() {
+    private static void ensureComfortServiceAsync(final boolean wakeEvent) {
         if (!"1".equals(getProp("sys.boot_completed"))) return;
         Thread t = new Thread("ComfortServiceEnsure") {
             @Override
@@ -157,9 +188,12 @@ public final class WelcomeDaemon {
                 try {
                     HmgApi api = HmgApi.connect().timeout(3500);
                     if (ComfortEngine.isModExplicitlyDisabled(api)) return;
+                    String action = wakeEvent
+                            ? ComfortService.ACTION_MOBIS_SCREEN_ON
+                            : ComfortService.ACTION_ENSURE_RUNNING;
                     Process p = new ProcessBuilder(
                             "/system/bin/am", "startservice", "--user", "0",
-                            "-a", ComfortService.ACTION_ENSURE_RUNNING,
+                            "-a", action,
                             "-n", "dev.lemoyne.comfort/.ComfortService")
                             .redirectErrorStream(true)
                             .start();
@@ -172,9 +206,11 @@ public final class WelcomeDaemon {
     }
 
     private static void startProbeServer() {
+        OccupantSignalProbe probe = new OccupantSignalProbe(
+                new OccupantSignalProbe.ReflectionGen5wSignalSource(new CabinPushBridge()),
+                "UID 1000 daemon");
+        activeProbe = probe;
         try {
-            OccupantSignalProbe probe = new OccupantSignalProbe(
-                    new OccupantSignalProbe.ReflectionGen5wSignalSource(), "UID 1000 daemon");
             OccupantSignalProbe.LoopbackServer srv =
                     new OccupantSignalProbe.LoopbackServer(probe, OccupantSignalProbe.DEFAULT_PORT);
             srv.start();

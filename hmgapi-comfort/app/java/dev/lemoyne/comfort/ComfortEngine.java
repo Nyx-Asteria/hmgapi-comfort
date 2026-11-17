@@ -41,6 +41,7 @@ public final class ComfortEngine {
         public final ComfortConfig config;
         public final Map<String, String> readings;
         public final OccupantSignalProbe.PassengerPresence passengerPresence;
+        public final OccupantSignalProbe.CabinState cabinState;
         public final String lastClimateStatus;
         public final String lastWelcomeStatus;
         public final boolean connected;
@@ -49,6 +50,7 @@ public final class ComfortEngine {
                 ComfortConfig config,
                 Map<String, String> readings,
                 OccupantSignalProbe.PassengerPresence passengerPresence,
+                OccupantSignalProbe.CabinState cabinState,
                 String lastClimateStatus,
                 String lastWelcomeStatus,
                 boolean connected) {
@@ -57,6 +59,9 @@ public final class ComfortEngine {
             this.passengerPresence = passengerPresence == null
                     ? OccupantSignalProbe.PassengerPresence.UNAVAILABLE
                     : passengerPresence;
+            this.cabinState = cabinState == null
+                    ? OccupantSignalProbe.CabinState.UNAVAILABLE
+                    : cabinState;
             this.lastClimateStatus = lastClimateStatus;
             this.lastWelcomeStatus = lastWelcomeStatus;
             this.connected = connected;
@@ -143,6 +148,8 @@ public final class ComfortEngine {
     private volatile Map<String, String> lastReadings = new LinkedHashMap<String, String>();
     private volatile OccupantSignalProbe.PassengerPresence lastPassengerPresence =
             OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
+    private volatile OccupantSignalProbe.CabinState lastCabinState =
+            OccupantSignalProbe.CabinState.UNAVAILABLE;
     private volatile String lastClimateStatus = "Waiting for vehicle start";
     private volatile String lastWelcomeStatus = "Armed for startup";
     private volatile boolean connected;
@@ -151,12 +158,15 @@ public final class ComfortEngine {
     private volatile boolean forceClimateRun;
     private volatile boolean forceWelcomeRun;
     private volatile boolean mobisAwake = true;
+    private volatile boolean uiForeground;
     private Thread worker;
     private int welcomeAttempts;
     private int outOfParkWelcomeChecks;
     private int tempTimeoutRetries;
     private long lastEngineSleepGap = Long.MIN_VALUE;
     private long lastEngineWakeSeq = Long.MIN_VALUE;
+    private int lastEngineMobisSleeping = -1;
+    private boolean showingAccStandbyNote;
 
     private ComfortEngine(Context appContext) {
         this.appContext = appContext;
@@ -198,7 +208,15 @@ public final class ComfortEngine {
 
     public Snapshot snapshot() {
         return new Snapshot(config, new LinkedHashMap<String, String>(lastReadings),
-                lastPassengerPresence, lastClimateStatus, lastWelcomeStatus, connected);
+                lastPassengerPresence, lastCabinState, lastClimateStatus, lastWelcomeStatus, connected);
+    }
+
+    public void setUiForeground(boolean foreground) {
+        this.uiForeground = foreground;
+        if (foreground) {
+            mobisAwake = true;
+            wakeWorker();
+        }
     }
 
     public void onScreenOff() {
@@ -225,6 +243,7 @@ public final class ComfortEngine {
         welcomeAttempts = 0;
         outOfParkWelcomeChecks = 0;
         tempTimeoutRetries = 0;
+        showingAccStandbyNote = false;
         wakeWorker();
     }
 
@@ -256,8 +275,32 @@ public final class ComfortEngine {
         }
     }
 
-    private boolean isScreenInteractive() {
+    private boolean isScreenInteractive(OccupantSignalProbe.CabinState cabin) {
+        if (uiForeground) {
+            return true;
+        }
+        if (cabin != null) {
+            if (cabin.avAwake == 1) {
+                return isDisplayOn();
+            }
+            if (cabin.avAwake == 0) {
+                return false;
+            }
+        }
         return mobisAwake && isDisplayOn();
+    }
+
+    private OccupantSignalProbe.CabinState readMergedTelemetry(HmgApi api) throws IOException {
+        Map<String, String> raw = readVehicleReadings(api, READ_KEYS);
+        OccupantSignalProbe.CabinState cabin = occupancyClient.queryCabinState();
+        if (cabin == null) {
+            cabin = OccupantSignalProbe.CabinState.UNAVAILABLE;
+        }
+        Map<String, String> merged = ComfortPolicy.mergeCabinFallback(raw, cabin);
+        lastReadings = merged;
+        lastCabinState = cabin;
+        lastPassengerPresence = cabin.passenger;
+        return cabin;
     }
 
     private synchronized void wakeWorker() {
@@ -274,10 +317,12 @@ public final class ComfortEngine {
                 if ((lastEngineSleepGap != Long.MIN_VALUE && sleepGap - lastEngineSleepGap >= 3000L)
                         || (lastEngineWakeSeq != Long.MIN_VALUE && wakeSeq > lastEngineWakeSeq)) {
                     mobisAwake = isDisplayOn();
+                    occupancyClient.notifyWake();
                     boardingTracker.reset();
                     welcomeAttempts = 0;
                     outOfParkWelcomeChecks = 0;
                     tempTimeoutRetries = 0;
+                    showingAccStandbyNote = false;
                 }
                 lastEngineSleepGap = sleepGap;
                 lastEngineWakeSeq = wakeSeq;
@@ -328,29 +373,75 @@ public final class ComfortEngine {
                     handleWelcome(api, manual);
                 }
 
-                Map<String, String> v = readVehicleReadings(api, READ_KEYS);
-                lastReadings = v;
+                OccupantSignalProbe.CabinState cabin = readMergedTelemetry(api);
+                Map<String, String> v = lastReadings;
 
-                OccupantSignalProbe.PassengerPresence presence = occupancyClient.queryPassengerPresence();
-                lastPassengerPresence = presence;
+                if (cabin.mobisSleeping == 1) {
+                    mobisAwake = false;
+                    if (!"1".equals(v.get("hv.ready"))) {
+                        driveTracker.onPowerOff();
+                        boardingTracker.reset();
+                        welcomeTracker.onScreenOff();
+                        welcomeAttempts = 0;
+                        outOfParkWelcomeChecks = 0;
+                        tempTimeoutRetries = 0;
+                        showingAccStandbyNote = false;
+                    }
+                    lastEngineMobisSleeping = 1;
+                } else if (cabin.mobisSleeping == 0) {
+                    mobisAwake = true;
+                    if (lastEngineMobisSleeping == 1) {
+                        if (!"1".equals(v.get("hv.ready"))) {
+                            driveTracker.onPowerOff();
+                            boardingTracker.reset();
+                            tempTimeoutRetries = 0;
+                            showingAccStandbyNote = false;
+                        }
+                        welcomeTracker.onScreenOn(SystemClock.elapsedRealtime());
+                        welcomeAttempts = 0;
+                        outOfParkWelcomeChecks = 0;
+                    }
+                    lastEngineMobisSleeping = 0;
+                }
+
+                OccupantSignalProbe.PassengerPresence presence = cabin.passenger;
 
                 // 2. Cold/Warm auto-climate on EV Ready or plugged-in/Utility cabin session (or manual test button)
                 boolean manualClimate = forceClimateRun;
                 forceClimateRun = false;
-                boolean interactive = isScreenInteractive();
-                boolean startSession = driveTracker.shouldTrigger(v, interactive);
+                boolean interactive = isScreenInteractive(cabin);
+                boolean startSession = driveTracker.shouldTrigger(v, interactive, cabin.ignOn);
                 if (!driveTracker.isCompleted() && !startSession) {
                     boardingTracker.reset();
                 }
 
                 if (manualClimate || (config.climateEnabled && startSession)) {
+                    showingAccStandbyNote = false;
                     runClimateSequence(api, manualClimate);
-                } else if (boardingTracker.shouldTriggerLateBoarding(config, v, interactive, presence)) {
+                } else if (boardingTracker.shouldTriggerLateBoarding(
+                        config, v, interactive, cabin.ignOn, presence)) {
                     runPassengerBoardingSequence(api, v, presence);
+                } else if (config.climateEnabled
+                        && !driveTracker.isCompleted()
+                        && ComfortPolicy.isPluggedInAccStandby(v, interactive, cabin.ignOn)) {
+                    float ambF = ComfortPolicy.parseAmbientF(v.get("outside_temp_f"));
+                    String ambTag = Float.isNaN(ambF) ? "" : (" (" + Math.round(ambF) + "°F)");
+                    String nextMsg = "Charging (ACC)" + ambTag
+                            + " — press Start (no brake) for Ignition ON & heaters";
+                    if (!showingAccStandbyNote || !lastClimateStatus.endsWith(nextMsg)) {
+                        lastClimateStatus = stamp(nextMsg);
+                        showingAccStandbyNote = true;
+                    }
+                } else if (showingAccStandbyNote && !driveTracker.isCompleted()) {
+                    showingAccStandbyNote = false;
+                    lastClimateStatus = "Waiting for vehicle start";
                 }
 
                 notifyListeners();
-                sleepQuietly(config.welcomeDismiss && welcomeTracker.isPending() ? 400 : 2500);
+                long pollSleepMs = (config.welcomeDismiss && welcomeTracker.isPending())
+                        ? 400L
+                        : ((uiForeground || showingAccStandbyNote) ? 1200L : 2500L);
+                sleepQuietly(pollSleepMs);
             } catch (Throwable t) {
                 Log.w(TAG, "[hmgapi-comfort] loop error: " + t);
                 notifyListeners();
@@ -440,26 +531,34 @@ public final class ComfortEngine {
             sleepQuietly(1500);   // let BCM/USM/VR settle after EV Ready / cabin power transition
         }
         // Wait up to 60 s for valid post-wake outside_temp_f and BCM seat climate readiness
+        // (bounded to 5 s when manually tapped in ACC standby so the UI responds promptly)
         Map<String, String> v = null;
+        OccupantSignalProbe.CabinState cabin = lastCabinState;
         float tempF = Float.NaN;
         long tempValidSince = 0L;
         int powerLostTicks = 0;
-        long deadline = SystemClock.elapsedRealtime() + 60000L;
+        boolean initialAccManual = manual
+                && cabin.ignOn == 0
+                && !"1".equals(lastReadings.get("hv.ready"))
+                && !ComfortPolicy.isBcmSeatClimateReady(lastReadings);
+        long deadline = SystemClock.elapsedRealtime() + (initialAccManual ? 5000L : 60000L);
         while (running && SystemClock.elapsedRealtime() < deadline) {
             if (config.welcomeDismiss
                     && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs)) {
                 handleWelcome(api, false);
             }
             try {
-                v = readVehicleReadings(api, READ_KEYS);
-                lastReadings = v;
+                cabin = readMergedTelemetry(api);
+                v = lastReadings;
             } catch (IOException e) {
                 Log.w(TAG, "[hmgapi-comfort] vehicle read retry during climate wait: " + e);
                 sleepQuietly(1200);
                 continue;
             }
             if (!manual) {
-                if ("0".equals(v.get("hv.ready")) && !ComfortPolicy.isBcmSeatClimateReady(v)) {
+                if ("0".equals(v.get("hv.ready"))
+                        && !ComfortPolicy.isBcmSeatClimateReady(v)
+                        && cabin.ignOn != 1) {
                     powerLostTicks++;
                     if (powerLostTicks >= 2) {
                         lastClimateStatus = stamp("Aborted (vehicle turned off)");
@@ -470,6 +569,15 @@ public final class ComfortEngine {
                 }
             }
             tempF = ComfortPolicy.parseAmbientF(v.get("outside_temp_f"));
+            boolean inAccStandby = !"1".equals(v.get("hv.ready"))
+                    && !ComfortPolicy.isBcmSeatClimateReady(v)
+                    && cabin.ignOn == 0;
+            if (manual && inAccStandby && (!Float.isNaN(tempF) || cabin.datcSentinel)) {
+                String ambTag = Float.isNaN(tempF) ? "" : (" (" + Math.round(tempF) + "°F)");
+                lastClimateStatus = stamp("Ignition in ACC" + ambTag
+                        + " — press Start (no brake) for Ignition ON & heaters");
+                return;
+            }
             if (!Float.isNaN(tempF)) {
                 if (tempValidSince == 0L) {
                     tempValidSince = SystemClock.elapsedRealtime();
@@ -489,8 +597,23 @@ public final class ComfortEngine {
             sleepQuietly(1500);
         }
 
+        if (manual
+                && v != null
+                && !"1".equals(v.get("hv.ready"))
+                && !ComfortPolicy.isBcmSeatClimateReady(v)
+                && cabin.ignOn == 0) {
+            String ambTag = Float.isNaN(tempF) ? "" : (" (" + Math.round(tempF) + "°F)");
+            lastClimateStatus = stamp("Ignition in ACC" + ambTag
+                    + " — press Start (no brake) for Ignition ON & heaters");
+            return;
+        }
+
         if (Float.isNaN(tempF) || v == null) {
-            if (!manual && tempTimeoutRetries < 2) {
+            if (manual) {
+                lastClimateStatus = stamp("Outside temperature unavailable (check Ignition ON)");
+                return;
+            }
+            if (tempTimeoutRetries < 2) {
                 tempTimeoutRetries++;
                 lastClimateStatus = stamp("Outside temperature delayed (retry " + tempTimeoutRetries + "/2)...");
                 Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable after 60 s; will retry ("
@@ -503,16 +626,18 @@ public final class ComfortEngine {
             return;
         }
 
-        OccupantSignalProbe.PassengerPresence presence = occupancyClient.queryPassengerPresence();
+        OccupantSignalProbe.PassengerPresence presence = cabin.passenger;
         if (!manual
                 && config.passengerAutoDetect
                 && !ComfortConfig.POLICY_OFF.equals(config.passengerPolicy)
                 && !presence.available) {
             for (int i = 0; i < 5 && running && !presence.available; i++) {
                 sleepQuietly(500);
-                presence = occupancyClient.queryPassengerPresence();
+                cabin = occupancyClient.queryCabinState();
+                presence = cabin.passenger;
             }
         }
+        lastCabinState = cabin;
         lastPassengerPresence = presence;
 
         tempTimeoutRetries = 0;
@@ -627,8 +752,8 @@ public final class ComfortEngine {
             }
 
             try {
-                Map<String, String> check = readVehicleReadings(api, READ_KEYS);
-                lastReadings = check;
+                readMergedTelemetry(api);
+                Map<String, String> check = lastReadings;
                 List<ComfortPolicy.Action> retry = new ArrayList<ComfortPolicy.Action>();
                 for (ComfortPolicy.Action act : candidates) {
                     if (!ComfortPolicy.isActionConfirmed(act, check)) {

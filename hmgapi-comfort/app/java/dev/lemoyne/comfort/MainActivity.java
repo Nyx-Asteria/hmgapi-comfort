@@ -59,6 +59,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private volatile Map<String, String> latestReadings;
     private OccupantSignalProbe.PassengerPresence latestPresence =
             OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
+    private OccupantSignalProbe.CabinState latestCabin =
+            OccupantSignalProbe.CabinState.UNAVAILABLE;
 
     // Left rail & navigation views
     private TextView lblConnSub;
@@ -161,6 +163,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         super.onResume();
         activityResumed = true;
         if (engine != null) {
+            engine.setUiForeground(true);
             engine.addListener(this);
             engine.requestSettingsReload();
         }
@@ -172,6 +175,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         activityResumed = false;
         ui.removeCallbacks(probeTickRunnable);
         if (engine != null) {
+            engine.setUiForeground(false);
             engine.removeListener(this);
         }
         super.onPause();
@@ -304,9 +308,9 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         chipEv = statusChip("EV --", SURFACE_HIGH, ON_SURFACE_VAR);
         chipGear = statusChip("Gear --", SURFACE_HIGH, ON_SURFACE_VAR);
         chipWheel = statusChip("Wheel --", SURFACE_HIGH, ON_SURFACE_VAR);
-        chipsRow.addView(chipEv, chipWeight(0, 4));
-        chipsRow.addView(chipGear, chipWeight(4, 4));
-        chipsRow.addView(chipWheel, chipWeight(4, 0));
+        chipsRow.addView(chipEv, chipWeight(1.35f, 0, 3));
+        chipsRow.addView(chipGear, chipWeight(0.75f, 3, 3));
+        chipsRow.addView(chipWheel, chipWeight(1.0f, 3, 0));
         teleCard.addView(chipsRow, crLp);
         rail.addView(teleCard, teleLp);
 
@@ -1230,12 +1234,14 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
     private String buildHmgProbeSummary() {
         Map<String, String> r = latestReadings;
         if (r == null || r.isEmpty()) {
-            return "waiting for HMG-API readings (" + latestPresence.summary() + ")";
+            return "waiting for HMG-API readings (" + latestPresence.summary()
+                    + " · " + latestCabin.summary() + ")";
         }
         return "hv.ready=" + val(r, "hv.ready")
                 + " gear.park=" + val(r, "gear.park")
                 + " charging=" + val(r, "charging")
                 + " temp_f=" + val(r, "outside_temp_f")
+                + " cabin=[" + latestCabin.summary() + "]"
                 + " pass_occ=[" + latestPresence.summary() + "]"
                 + " seat_state[drv=" + val(r, "seat_state.driver")
                 + ", psg=" + val(r, "seat_state.passenger")
@@ -1299,6 +1305,9 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         latestPresence = s.passengerPresence == null
                 ? OccupantSignalProbe.PassengerPresence.UNAVAILABLE
                 : s.passengerPresence;
+        latestCabin = s.cabinState == null
+                ? OccupantSignalProbe.CabinState.UNAVAILABLE
+                : s.cabinState;
 
         // Connection status
         lblConnSub.setText(s.connected ? "Connected · HMG-API" : "Waiting for HMG-API…");
@@ -1320,18 +1329,35 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         } else {
             lblAmbientTemp.setText("--°F");
             lblAmbientSub.setText("");
-            styleChip(lblZoneChip, s.connected ? "No Temp" : "Offline", SURFACE_HIGH, ON_SURFACE_VAR);
+            boolean accNoIgn = s.connected
+                    && latestCabin.ignOn == 0
+                    && (r == null || !"1".equals(r.get("hv.ready")))
+                    && !ComfortPolicy.isBcmSeatClimateReady(r);
+            if (accNoIgn) {
+                styleChip(lblZoneChip, "ACC · Off", TERTIARY_CONT, ON_TERTIARY_CONT);
+            } else {
+                styleChip(lblZoneChip, s.connected ? "No Temp" : "Offline", SURFACE_HIGH, ON_SURFACE_VAR);
+            }
         }
 
         // Powertrain & wheel chips
         boolean evReady = r != null && "1".equals(r.get("hv.ready"));
         boolean charging = ComfortPolicy.isChargingActive(r);
-        boolean cabinOn = ComfortPolicy.isBcmSeatClimateReady(r);
+        boolean cabinOn = ComfortPolicy.isBcmSeatClimateReady(r) || latestCabin.ignOn == 1;
         boolean evOff = r != null && "0".equals(r.get("hv.ready"));
-        if (evReady) styleChip(chipEv, "EV Ready", OK_CONT, ON_OK_CONT);
-        else if (charging) styleChip(chipEv, "Charging", TERTIARY_CONT, ON_TERTIARY_CONT);
-        else if (cabinOn) styleChip(chipEv, "Cabin On", SECONDARY_CONT, ON_SECONDARY_CONT);
-        else styleChip(chipEv, evOff ? "Standby" : "EV --", SURFACE_HIGH, ON_SURFACE_VAR);
+        if (evReady) {
+            styleChip(chipEv, "EV Ready", OK_CONT, ON_OK_CONT);
+        } else if (charging && cabinOn) {
+            styleChip(chipEv, "Charge · ON", OK_CONT, ON_OK_CONT);
+        } else if (charging && latestCabin.ignOn == 0) {
+            styleChip(chipEv, "Charge · ACC", TERTIARY_CONT, ON_TERTIARY_CONT);
+        } else if (charging) {
+            styleChip(chipEv, "Charging", TERTIARY_CONT, ON_TERTIARY_CONT);
+        } else if (cabinOn) {
+            styleChip(chipEv, "Cabin On", SECONDARY_CONT, ON_SECONDARY_CONT);
+        } else {
+            styleChip(chipEv, evOff ? "Standby" : "EV --", SURFACE_HIGH, ON_SURFACE_VAR);
+        }
 
         boolean inPark = r != null && "1".equals(r.get("gear.park"));
         boolean inDrive = r != null && "0".equals(r.get("gear.park"));
@@ -1509,7 +1535,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         t.setGravity(Gravity.CENTER);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(d(9), d(4), d(9), d(4));
+        t.setPadding(d(7), d(4), d(7), d(4));
         styleChip(t, text, bg, fg);
         return t;
     }
@@ -1527,8 +1553,8 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         return lp;
     }
 
-    private LinearLayout.LayoutParams chipWeight(int leftDp, int rightDp) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+    private LinearLayout.LayoutParams chipWeight(float weight, int leftDp, int rightDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight);
         lp.leftMargin = d(leftDp);
         lp.rightMargin = d(rightDp);
         return lp;

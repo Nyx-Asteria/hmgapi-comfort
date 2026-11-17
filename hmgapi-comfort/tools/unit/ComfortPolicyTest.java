@@ -239,6 +239,7 @@ public final class ComfortPolicyTest {
         liveSignals.put("HSCAN.getOdometer", "12340");
         liveSignals.put("SYS.getVIN", "SHOULD_BE_BLOCKED");
 
+        final int[] wakeCount = new int[] { 0 };
         OccupantSignalProbe.SignalSource mockSrc = new OccupantSignalProbe.SignalSource() {
             @Override
             public String serviceStatusSummary() {
@@ -263,6 +264,21 @@ public final class ComfortPolicyTest {
             @Override
             public OccupantSignalProbe.PassengerPresence readPassengerPresence() {
                 return OccupantSignalProbe.PassengerPresence.fromSignalMap(liveSignals);
+            }
+
+            @Override
+            public OccupantSignalProbe.CabinState readCabinState() {
+                return OccupantSignalProbe.CabinState.fromSignalMap(liveSignals);
+            }
+
+            @Override
+            public int readMobisSleepingFast() {
+                return OccupantSignalProbe.CabinState.fromSignalMap(liveSignals).mobisSleeping;
+            }
+
+            @Override
+            public void onWake() {
+                wakeCount[0]++;
             }
         };
 
@@ -293,10 +309,19 @@ public final class ComfortPolicyTest {
         check("report never leaks blocked VIN signal", false,
                 fullReport.contains("SHOULD_BE_BLOCKED") || fullReport.contains("SYS.getVIN"));
 
-        // 13. LoopbackServer + LoopbackClient round-trip & OCCUPANCY fast query
+        // 13. LoopbackServer + LoopbackClient round-trip & OCCUPANCY / CABIN_STATE / WAKE fast queries
         liveSignals.put("HSCAN.getOccupancy", "2");
         liveSignals.put("SYS.getClassStatus", "2");
         liveSignals.put("HSCAN.getAsstStBltSwSta", "1");
+        liveSignals.put("BCM.getIGNStatus", "true");
+        liveSignals.put("DATC.isIGN3Status", "true");
+        liveSignals.put("BLACKSCREEN.isBlackScreenShown", "false");
+        liveSignals.put("POWER.isAvPowerOff", "false");
+        liveSignals.put("POWER.isDisplayOffMode", "false");
+        liveSignals.put("PUSH.outside_temp_f", "33.5");
+        liveSignals.put("PUSH.outside_temp", "0.8");
+        liveSignals.put("PUSH.wheel_heat", "0");
+        liveSignals.put("PUSH.datc_sentinel", "0");
         OccupantSignalProbe.LoopbackServer srv = new OccupantSignalProbe.LoopbackServer(probe, 0);
         srv.start();
         try {
@@ -309,6 +334,15 @@ public final class ComfortPolicyTest {
                     "true/true/2/2/1",
                     loopOcc.available + "/" + loopOcc.occupied + "/"
                             + loopOcc.hscanOccupancy + "/" + loopOcc.sysClassStatus + "/" + loopOcc.asstBelt);
+            OccupantSignalProbe.CabinState loopCabin = cli.queryCabinState();
+            check("loopback CABIN_STATE query reports push temp, wheel, ign, avAwake & mobisSleeping",
+                    "33.5/0.8/0/1/1/1/0/false",
+                    loopCabin.outsideTempF + "/" + loopCabin.outsideTempC + "/" + loopCabin.wheelHeat
+                            + "/" + loopCabin.ignOn + "/" + loopCabin.ign3On
+                            + "/" + loopCabin.avAwake + "/" + loopCabin.mobisSleeping
+                            + "/" + loopCabin.datcSentinel);
+            cli.notifyWake();
+            check("loopback WAKE triggers source.onWake()", 1, wakeCount[0]);
             OccupantSignalProbe.UiState uiState = cli.pollUi(false, "hv.ready=1");
             check("loopback pollUi returns UID 1000 banner", true,
                     uiState.sourceBanner.startsWith("UID 1000 test"));
@@ -479,6 +513,70 @@ public final class ComfortPolicyTest {
                 OccupantSignalProbe.isNoisyCounter("HSCAN.getSpeedDistKM"));
         check("noisy filter catches HEVFlag.DATC_CLMTPWRCNSMPTN_W", true,
                 OccupantSignalProbe.isNoisyCounter("HEVFlag.DATC_CLMTPWRCNSMPTN_W"));
+
+        // 20. QuickBoot plugged-in charging: CabinState push fallback, DisplayOff vs BlackScreen, and ACC -> Ignition ON
+        check("DisplayOff sets avAwake=0 without mobisSleeping=1", "0/0",
+                OccupantSignalProbe.CabinState.computeAvAwake(0, 0, 1)
+                        + "/" + OccupantSignalProbe.CabinState.computeMobisSleeping(0, 0));
+        check("BlackScreen sets both avAwake=0 and mobisSleeping=1", "0/1",
+                OccupantSignalProbe.CabinState.computeAvAwake(1, 0, 0)
+                        + "/" + OccupantSignalProbe.CabinState.computeMobisSleeping(1, 0));
+        check("AV awake sets avAwake=1 and mobisSleeping=0", "1/0",
+                OccupantSignalProbe.CabinState.computeAvAwake(0, 0, 0)
+                        + "/" + OccupantSignalProbe.CabinState.computeMobisSleeping(0, 0));
+
+        OccupantSignalProbe.CabinState pushOn = new OccupantSignalProbe.CabinState(
+                soloEmpty, "31.5", "-0.3", "1", 1, 1, 1, 0, false);
+        OccupantSignalProbe.CabinState pushDecoded =
+                OccupantSignalProbe.CabinState.decode(pushOn.encode());
+        check("CabinState encode/decode round-trip", pushOn.encode(), pushDecoded.encode());
+
+        Map<String, String> staleWakeHub = state(
+                "hv.ready", "0", "charging", "1", "gear.park", "1",
+                "outside_temp_f", "-", "outside_temp", "-", "wheel_heat", "-",
+                "seat_state.driver", "2");
+        Map<String, String> mergedWake = ComfortPolicy.mergeCabinFallback(staleWakeHub, pushOn);
+        check("mergeCabinFallback fills missing outside_temp_f from CabinPushBridge",
+                "31.5", mergedWake.get("outside_temp_f"));
+        check("mergeCabinFallback fills missing outside_temp C from CabinPushBridge",
+                "-0.3", mergedWake.get("outside_temp"));
+        check("mergeCabinFallback fills missing wheel_heat from CabinPushBridge",
+                "1", mergedWake.get("wheel_heat"));
+
+        Map<String, String> liveHub = state(
+                "outside_temp_f", "29.0", "outside_temp", "-1.7", "wheel_heat", "0");
+        Map<String, String> preservedHub = ComfortPolicy.mergeCabinFallback(liveHub, pushOn);
+        check("mergeCabinFallback preserves non-empty HMG-API hub readings",
+                "29.0/-1.7/0",
+                preservedHub.get("outside_temp_f") + "/"
+                        + preservedHub.get("outside_temp") + "/"
+                        + preservedHub.get("wheel_heat"));
+
+        OccupantSignalProbe.CabinState accSentinelCabin = new OccupantSignalProbe.CabinState(
+                soloEmpty, "-40.0", "-40.0", "0", 0, 1, 1, 0, true);
+        Map<String, String> mergedAcc = ComfortPolicy.mergeCabinFallback(staleWakeHub, accSentinelCabin);
+        check("mergeCabinFallback rejects -40.0 F DATC sentinel while still filling wheel_heat",
+                "-/0", mergedAcc.get("outside_temp_f") + "/" + mergedAcc.get("wheel_heat"));
+
+        ComfortPolicy.DriveTracker qbChargeDt = new ComfortPolicy.DriveTracker();
+        Map<String, String> pluggedAcc = state(
+                "hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "0");
+        check("plugged-in ACC standby detected when charging in Park with ignOn=0", true,
+                ComfortPolicy.isPluggedInAccStandby(pluggedAcc, true, 0));
+        check("plugged-in ACC standby does NOT trigger heaters while IG2 off", false,
+                qbChargeDt.shouldTrigger(pluggedAcc, true, 0));
+        check("pressing Start -> Ignition ON (ignOn=1) while charging immediately triggers climate", true,
+                qbChargeDt.shouldTrigger(pluggedAcc, true, 1));
+        check("isPluggedInAccStandby clears as soon as ignOn=1", false,
+                ComfortPolicy.isPluggedInAccStandby(pluggedAcc, true, 1));
+        qbChargeDt.markCompleted();
+        check("same plugged-in Ignition ON session does not re-fire", false,
+                qbChargeDt.shouldTrigger(state(
+                        "hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "8"), true, 1));
+        qbChargeDt.shouldTrigger(pluggedAcc, false, 0);
+        qbChargeDt.shouldTrigger(pluggedAcc, false, 0);
+        check("turning off Ignition while remaining plugged in re-arms for next wake", true,
+                qbChargeDt.shouldTrigger(pluggedAcc, true, 1));
 
         System.exit(fail);
     }

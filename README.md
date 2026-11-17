@@ -15,8 +15,8 @@ Automatically dismisses the infotainment startup confirmation screen across cold
   - Configurable **Dismiss Delay (`0–2500 ms`)** if you prefer a brief pause after wake.
 - **3-Tier Cold-Weather Seat & Steering Wheel Warming**
   - Independent outside-temperature thresholds for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 38 °F` → L2, `≤ 50 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 45 °F`).
-  - Activates both on **EV Ready** drive starts and during **plugged-in / charging / Utility Mode** cabin sessions when you turn the vehicle ON in Park—while staying completely silent during unoccupied overnight charging or dark-screen remote Bluelink wakes.
-  - Ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR across cold-boot initialization, and **never overrides** active Bluelink or manual seat/wheel settings.
+  - Activates both on **EV Ready** drive starts and during **plugged-in / charging / Utility Mode** cabin sessions when you enter **Ignition ON** (`Start` without brake while tethered, shown as `Charge · ON`)—while distinguishing unpowered **ACC** standby (`Charge · ACC`) and staying completely silent during unoccupied overnight charging or dark-screen remote Bluelink wakes.
+  - Includes a standalone UID-1000 `DATC` / `BCM` Binder push bridge so live outside temperature and steering wheel heat recover immediately on QuickBoot wakes while plugged in and charging, ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR, and **never overrides** active Bluelink or manual seat/wheel settings.
 - **3-Tier Warm-Weather Front Seat Ventilation**
   - Automatic summer seat cooling thresholds for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats.
 - **Automatic Front-Passenger Occupancy Detection & Rear Seat Policies**
