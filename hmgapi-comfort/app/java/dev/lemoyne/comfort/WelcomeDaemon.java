@@ -48,6 +48,7 @@ public final class WelcomeDaemon {
 
         ensureComfortServiceAsync();
         lastEnsureMs = SystemClock.elapsedRealtime();
+        startProbeServer();
 
         refreshSettings(true);
         if (welcomeDismiss) {
@@ -168,6 +169,19 @@ public final class WelcomeDaemon {
         };
         t.setDaemon(true);
         t.start();
+    }
+
+    private static void startProbeServer() {
+        try {
+            OccupantSignalProbe probe = new OccupantSignalProbe(
+                    new OccupantSignalProbe.ReflectionGen5wSignalSource(), "UID 1000 daemon");
+            OccupantSignalProbe.LoopbackServer srv =
+                    new OccupantSignalProbe.LoopbackServer(probe, OccupantSignalProbe.DEFAULT_PORT);
+            srv.start();
+            log("occupant signal probe listening on 127.0.0.1:" + OccupantSignalProbe.DEFAULT_PORT);
+        } catch (Throwable t) {
+            log("occupant signal probe server unavailable: " + t);
+        }
     }
 
     private static void refreshSettings(boolean force) {

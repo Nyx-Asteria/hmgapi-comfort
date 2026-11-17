@@ -23,6 +23,8 @@ has "apk contains ComfortTheme" "Ldev/lemoyne/comfort/ComfortTheme;" "$DEX_STRIN
 has "apk contains ComfortIcons" "Ldev/lemoyne/comfort/ComfortIcons;" "$DEX_STRINGS"
 has "apk contains ComfortWidgets" "Ldev/lemoyne/comfort/ComfortWidgets;" "$DEX_STRINGS"
 has "apk contains BootReceiver" "Ldev/lemoyne/comfort/BootReceiver;" "$DEX_STRINGS"
+has "apk contains OccupantSignalProbe" "Ldev/lemoyne/comfort/OccupantSignalProbe;" "$DEX_STRINGS"
+has "apk contains ComfortUsbExporter" "Ldev/lemoyne/comfort/ComfortUsbExporter;" "$DEX_STRINGS"
 has "apk bundles HmgApi client" "Lhmgapi/client/HmgApi;" "$DEX_STRINGS"
 
 for ic in icon.png icon_night.png icon_disabled.png icon_disabled_night.png; do
@@ -48,6 +50,7 @@ eng apply
 check "engine apply succeeds" 0 "$rc"
 has "mod published as on" "1 of 1 mods on" "$out"
 has "mod in public state.json" '"hmgapi-comfort"' "$(cat "$R/data/hmgapi/public/state.json")"
+has "ComfortProbe USB folder registered in usb.txt" "hmgapi-comfort ComfortProbe" "$(cat "$R/data/hmgapi/state/usb.txt")"
 has "welcome daemon registered in services.txt at boot" "hmgapi-comfort welcome system boot yes jar app/Comfort.apk dev.lemoyne.comfort.WelcomeDaemon" "$(cat "$R/data/hmgapi/state/services.txt")"
 has "starter registered in services.txt as system" "hmgapi-comfort starter system android no script svc/start.sh -" "$(cat "$R/data/hmgapi/state/services.txt")"
 for cmd in startup_notice seat_heat seat_vent wheel_heat; do

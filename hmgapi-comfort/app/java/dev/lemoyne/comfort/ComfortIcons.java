@@ -30,6 +30,8 @@ final class ComfortIcons extends Drawable {
     static final int MINUS = 14;
     static final int RESET = 15;
     static final int AUTO_CLIMATE = 16;
+    static final int RADAR = 17;
+    static final int USB_EXPORT = 18;
 
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
@@ -248,6 +250,30 @@ final class ComfortIcons extends Drawable {
 
                 c.drawLine(18.0f * s, 15.0f * s, 18.0f * s, 20.0f * s, p);
                 c.drawLine(15.5f * s, 17.5f * s, 20.5f * s, 17.5f * s, p);
+                break;
+            }
+            case RADAR: {
+                c.drawCircle(12f * s, 12f * s, 8.5f * s, p);
+                oval.set(7.4f * s, 7.4f * s, 16.6f * s, 16.6f * s);
+                c.drawArc(oval, -120f, 210f, false, p);
+                c.drawLine(12f * s, 12f * s, 17.8f * s, 6.2f * s, p);
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(12f * s, 12f * s, 1.9f * s, p);
+                break;
+            }
+            case USB_EXPORT: {
+                path.moveTo(4.5f * s, 14.8f * s);
+                path.lineTo(4.5f * s, 19.5f * s);
+                path.lineTo(19.5f * s, 19.5f * s);
+                path.lineTo(19.5f * s, 14.8f * s);
+                c.drawPath(path, p);
+
+                c.drawLine(12f * s, 4.0f * s, 12f * s, 14.5f * s, p);
+                path.reset();
+                path.moveTo(8.2f * s, 10.8f * s);
+                path.lineTo(12f * s, 14.6f * s);
+                path.lineTo(15.8f * s, 10.8f * s);
+                c.drawPath(path, p);
                 break;
             }
         }
