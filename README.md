@@ -14,17 +14,18 @@ Automatically dismisses the infotainment startup confirmation screen across cold
   - Lightweight boot-stage daemon (`start: "boot"`) that dismisses the infotainment consent notice within milliseconds of `sys.boot_completed=1` on cold boot and within `150 ms` on QuickBoot suspend-to-RAM resume—only while safely in Park (`P`).
   - Configurable **Dismiss Delay (`0–2500 ms`)** if you prefer a brief pause after wake.
 - **3-Tier Cold-Weather Seat & Steering Wheel Warming**
-  - Independent outside-temperature thresholds for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 38 °F` → L2, `≤ 50 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 45 °F`).
+  - Independent outside-temperature thresholds (`1 °F` increments) for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 38 °F` → L2, `≤ 50 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 45 °F`).
   - Activates both on **EV Ready** drive starts and during **plugged-in / charging / Utility Mode** cabin sessions when you enter **Ignition ON** (`Start` without brake while tethered, shown as `Charge · ON`)—while distinguishing unpowered **ACC** standby (`Charge · ACC`) and staying completely silent during unoccupied overnight charging or dark-screen remote Bluelink wakes.
   - Includes a standalone UID-1000 `DATC` / `BCM` Binder push bridge so live outside temperature and steering wheel heat recover immediately on QuickBoot wakes while plugged in and charging, ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR, and **never overrides** active Bluelink or manual seat/wheel settings.
 - **3-Tier Warm-Weather Front Seat Ventilation**
-  - Automatic summer seat cooling thresholds for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats.
-- **Automatic Front-Passenger Occupancy Detection & Rear Seat Policies**
+  - Automatic summer seat cooling thresholds (`1 °F` increments) for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats—automatically hidden on trims without ventilated seats.
+- **Automatic Front-Passenger Occupancy Detection, Trim-Aware Hardware Detection & Rear Seat Policies**
+  - **Automatic Trim Capability Detection**: reads live Gen5W `BCM` / `USM` seat option codes (`*SeatHeatOption`) and silently hides ventilated front-seat or heated rear-seat tiles, toggles, policies, and summer threshold cards when not equipped on the vehicle.
   - **Front Passenger Policy** (`Off`, `-1 Step` gentler than driver, or `Match` driver) for both heating and cooling.
   - **Only When Passenger Detected** *(enabled by default)*: reads live Gen5W seat-occupancy classification & buckle sensors (`HSCAN.getOccupancy`, `SYS.getClassStatus`, `HSCAN.getAsstStBltSwSta`) so solo drives never heat or cool an empty passenger seat—and **automatically turns on passenger comfort mid-session** if a passenger sits down or buckles up after startup.
-  - **Rear Heated Seats Policy** (`Off`, `-1 Step`, or `Match` up to 2 rear levels) for vehicles with rear seat heaters.
+  - **Rear Heated Seats Policy** (`Off`, `-1 Step`, or `Match` up to 2 rear levels) on vehicles equipped with rear seat heaters.
 - **Material Design 3 Widescreen Dashboard (`1920×720`)**
-  - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live 4-seat cabin preview tiles, a `-5 °F .. 115 °F` seasonal comfort spectrum bar with live outside temperature pin, one-tap **Run Climate Check** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.
+  - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live cabin seat preview tiles, a seasonal comfort spectrum bar with live outside temperature pin, one-tap **Run Climate Check** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.
   - Zero `/system` file modifications and zero firmware-specific hook points—removing or disabling the mod leaves the head unit 100% stock.
 - **Built-In Cabin Signal Inspector (`Signal Inspector` Tab + USB Export)**
   - Read-only, privacy-filtered Gen5W OEM service inspector (`BCM`, `HSCAN`, `SYS`, `USM`, `CLU`, `DATC`, `HEV` + `HEVFlag`, `VR`, `PGS`, `REG`) for discovering front-passenger/rear seat occupancy, seatbelt buckle, door open/close, and Rear Occupant Alert (`ROA`) getters across Hyundai/Kia/Genesis models.

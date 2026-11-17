@@ -162,7 +162,145 @@ public final class OccupantSignalProbe {
     }
 
     /**
-     * Combined UID-1000 cabin, ignition, display-standby, and push-listener fallback snapshot:
+     * Tri-state optional seat climate hardware presence from Gen5W BCM / USM option getters
+     * ({@code 1} = equipped, {@code 0} = confirmed absent, {@code -1} = unknown / pre-CAN):
+     *  - {@code frontVent}: front seat ventilation ({@code *SeatHeatOption} in {@code 3..14}, e.g. {@code 6})
+     *  - {@code rearLeftHeat}: rear-left seat heater ({@code RLSeatHeatOption} in {@code 1..14})
+     *  - {@code rearRightHeat}: rear-right seat heater ({@code RRSeatHeatOption} in {@code 1..14})
+     *
+     * Absent ({@code 0}) is only asserted once at least one seat option reports a valid positive
+     * equipped enum ({@code 1..14}), preventing uninitialized pre-CAN zeros from hiding controls.
+     */
+    public static final class SeatCapabilities {
+        public static final SeatCapabilities UNKNOWN = new SeatCapabilities(-1, -1, -1);
+        public static final SeatCapabilities ALL_EQUIPPED = new SeatCapabilities(1, 1, 1);
+
+        public final int frontVent;
+        public final int rearLeftHeat;
+        public final int rearRightHeat;
+
+        public SeatCapabilities(int frontVent, int rearLeftHeat, int rearRightHeat) {
+            this.frontVent = normTri(frontVent);
+            this.rearLeftHeat = normTri(rearLeftHeat);
+            this.rearRightHeat = normTri(rearRightHeat);
+        }
+
+        public boolean isFrontVentSupported() {
+            return frontVent != 0;
+        }
+
+        public boolean isRearLeftHeatSupported() {
+            return rearLeftHeat != 0;
+        }
+
+        public boolean isRearRightHeatSupported() {
+            return rearRightHeat != 0;
+        }
+
+        public boolean hasAnyRearHeatSupported() {
+            return isRearLeftHeatSupported() || isRearRightHeatSupported();
+        }
+
+        public SeatCapabilities mergeKnown(SeatCapabilities live) {
+            if (live == null) return this;
+            int fv = live.frontVent != -1 ? live.frontVent : this.frontVent;
+            int rl = live.rearLeftHeat != -1 ? live.rearLeftHeat : this.rearLeftHeat;
+            int rr = live.rearRightHeat != -1 ? live.rearRightHeat : this.rearRightHeat;
+            return new SeatCapabilities(fv, rl, rr);
+        }
+
+        public static int pickOption(int primaryBcm, int fallbackUsm) {
+            if (primaryBcm >= 1 && primaryBcm <= 14) return primaryBcm;
+            if (fallbackUsm >= 1 && fallbackUsm <= 14) return fallbackUsm;
+            if (primaryBcm == 0 || fallbackUsm == 0) return 0;
+            return -1;
+        }
+
+        public static SeatCapabilities fromRawOptions(int drvOpt, int astOpt, int rlOpt, int rrOpt) {
+            boolean known = isEquippedCode(drvOpt)
+                    || isEquippedCode(astOpt)
+                    || isEquippedCode(rlOpt)
+                    || isEquippedCode(rrOpt);
+            if (!known) {
+                return UNKNOWN;
+            }
+            int fv = (isVentCode(drvOpt) || isVentCode(astOpt)) ? 1 : 0;
+            int rl = isEquippedCode(rlOpt) ? 1 : (rlOpt == 0 ? 0 : -1);
+            int rr = isEquippedCode(rrOpt) ? 1 : (rrOpt == 0 ? 0 : -1);
+            return new SeatCapabilities(fv, rl, rr);
+        }
+
+        public static SeatCapabilities fromSignalMap(Map<String, String> m) {
+            if (m == null || m.isEmpty()) return UNKNOWN;
+            int drv = pickOption(
+                    PassengerPresence.parseRawInt(m.get("BCM.getDrvSeatHeatOption")),
+                    PassengerPresence.parseRawInt(m.get("USM.getFrontSeatHeat_DrvOption")));
+            int ast = pickOption(
+                    PassengerPresence.parseRawInt(m.get("BCM.getAstSeatHeatOption")),
+                    PassengerPresence.parseRawInt(m.get("USM.getFrontSeatHeat_AstOption")));
+            int rl = pickOption(
+                    PassengerPresence.parseRawInt(m.get("BCM.getRLSeatHeatOption")),
+                    PassengerPresence.parseRawInt(m.get("USM.getRearSeatHeat_LeftOption")));
+            int rr = pickOption(
+                    PassengerPresence.parseRawInt(m.get("BCM.getRRSeatHeatOption")),
+                    PassengerPresence.parseRawInt(m.get("USM.getRearSeatHeat_RightOption")));
+            return fromRawOptions(drv, ast, rl, rr);
+        }
+
+        public String encode() {
+            return frontVent + "," + rearLeftHeat + "," + rearRightHeat;
+        }
+
+        public static SeatCapabilities decode(String wire) {
+            if (wire == null || wire.isEmpty()) return UNKNOWN;
+            String[] p = wire.trim().split(",");
+            if (p.length < 3) return UNKNOWN;
+            return new SeatCapabilities(
+                    PassengerPresence.parseRawInt(p[0]),
+                    PassengerPresence.parseRawInt(p[1]),
+                    PassengerPresence.parseRawInt(p[2]));
+        }
+
+        public String summary() {
+            return "vent=" + triChar(frontVent)
+                    + ",rl=" + triChar(rearLeftHeat)
+                    + ",rr=" + triChar(rearRightHeat);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof SeatCapabilities)) return false;
+            SeatCapabilities s = (SeatCapabilities) o;
+            return frontVent == s.frontVent
+                    && rearLeftHeat == s.rearLeftHeat
+                    && rearRightHeat == s.rearRightHeat;
+        }
+
+        @Override
+        public int hashCode() {
+            return (frontVent + 2) * 31 * 31 + (rearLeftHeat + 2) * 31 + (rearRightHeat + 2);
+        }
+
+        private static boolean isEquippedCode(int opt) {
+            return opt >= 1 && opt <= 14;
+        }
+
+        private static boolean isVentCode(int opt) {
+            return opt >= 3 && opt <= 14;
+        }
+
+        private static int normTri(int v) {
+            return v == 1 ? 1 : (v == 0 ? 0 : -1);
+        }
+
+        private static String triChar(int v) {
+            return v == 1 ? "1" : (v == 0 ? "0" : "-");
+        }
+    }
+
+    /**
+     * Combined UID-1000 cabin, ignition, display-standby, push-listener fallback, and seat-option snapshot:
      *  - passenger: front-passenger occupancy & buckle state
      *  - outsideTempF / outsideTempC / wheelHeat: fresh Binder listener push values when HMG-API hub is "-"
      *  - ignOn: BCM.getIGNStatus (1 = Ignition ON, 0 = ACC/OFF, -1 = unknown)
@@ -170,10 +308,12 @@ public final class OccupantSignalProbe {
      *  - avAwake: 1 = display & AV active, 0 = BlackScreen / AV-Off / Display-Off, -1 = unknown
      *  - mobisSleeping: 1 = Mobis BlackScreen or AV-Off QuickBoot standby, 0 = awake, -1 = unknown
      *  - datcSentinel: true when DATC pushed -40.0 F raw-zero sentinel (unpowered IG1/ACC)
+     *  - seatCaps: vehicle hardware presence for ventilated front seats & heated rear seats
      */
     public static final class CabinState {
         public static final CabinState UNAVAILABLE = new CabinState(
-                PassengerPresence.UNAVAILABLE, "-", "-", "-", -1, -1, -1, -1, false);
+                PassengerPresence.UNAVAILABLE, "-", "-", "-", -1, -1, -1, -1, false,
+                SeatCapabilities.UNKNOWN);
 
         public final PassengerPresence passenger;
         public final String outsideTempF;
@@ -184,6 +324,7 @@ public final class OccupantSignalProbe {
         public final int avAwake;
         public final int mobisSleeping;
         public final boolean datcSentinel;
+        public final SeatCapabilities seatCaps;
 
         public CabinState(
                 PassengerPresence passenger,
@@ -195,6 +336,22 @@ public final class OccupantSignalProbe {
                 int avAwake,
                 int mobisSleeping,
                 boolean datcSentinel) {
+            this(passenger, outsideTempF, outsideTempC, wheelHeat,
+                    ignOn, ign3On, avAwake, mobisSleeping, datcSentinel,
+                    SeatCapabilities.UNKNOWN);
+        }
+
+        public CabinState(
+                PassengerPresence passenger,
+                String outsideTempF,
+                String outsideTempC,
+                String wheelHeat,
+                int ignOn,
+                int ign3On,
+                int avAwake,
+                int mobisSleeping,
+                boolean datcSentinel,
+                SeatCapabilities seatCaps) {
             this.passenger = passenger == null ? PassengerPresence.UNAVAILABLE : passenger;
             this.outsideTempF = normField(outsideTempF);
             this.outsideTempC = normField(outsideTempC);
@@ -204,6 +361,7 @@ public final class OccupantSignalProbe {
             this.avAwake = avAwake;
             this.mobisSleeping = mobisSleeping;
             this.datcSentinel = datcSentinel;
+            this.seatCaps = seatCaps == null ? SeatCapabilities.UNKNOWN : seatCaps;
         }
 
         public static int computeAvAwake(int blackScreen, int avPowerOff, int displayOffMode) {
@@ -240,7 +398,8 @@ public final class OccupantSignalProbe {
                     parseTriState(m.get("DATC.isIGN3Status")),
                     computeAvAwake(black, avOff, dispOff),
                     computeMobisSleeping(black, avOff),
-                    parseTriState(m.get("PUSH.datc_sentinel")) == 1);
+                    parseTriState(m.get("PUSH.datc_sentinel")) == 1,
+                    SeatCapabilities.fromSignalMap(m));
         }
 
         public String encode() {
@@ -252,13 +411,17 @@ public final class OccupantSignalProbe {
                     + ign3On + "\t"
                     + avAwake + "\t"
                     + mobisSleeping + "\t"
-                    + (datcSentinel ? "1" : "0");
+                    + (datcSentinel ? "1" : "0") + "\t"
+                    + seatCaps.encode();
         }
 
         public static CabinState decode(String wire) {
             if (wire == null || wire.isEmpty()) return UNAVAILABLE;
             String[] p = wire.split("\t", -1);
             if (p.length < 9) return UNAVAILABLE;
+            SeatCapabilities caps = p.length >= 10
+                    ? SeatCapabilities.decode(p[9])
+                    : SeatCapabilities.UNKNOWN;
             return new CabinState(
                     PassengerPresence.decode(p[0]),
                     p[1],
@@ -268,7 +431,8 @@ public final class OccupantSignalProbe {
                     PassengerPresence.parseRawInt(p[5]),
                     PassengerPresence.parseRawInt(p[6]),
                     PassengerPresence.parseRawInt(p[7]),
-                    "1".equals(p[8].trim()));
+                    "1".equals(p[8].trim()),
+                    caps);
         }
 
         public String summary() {
@@ -277,7 +441,8 @@ public final class OccupantSignalProbe {
                     + " av_awake=" + triName(avAwake)
                     + " push_temp_f=" + outsideTempF
                     + (datcSentinel ? "(sentinel)" : "")
-                    + " push_wheel=" + wheelHeat;
+                    + " push_wheel=" + wheelHeat
+                    + " caps=[" + seatCaps.summary() + "]";
         }
 
         private static String normField(String s) {
@@ -1374,6 +1539,14 @@ public final class OccupantSignalProbe {
         private BoundGetter bgBlackScreenShown;
         private BoundGetter bgAvPowerOff;
         private BoundGetter bgDisplayOffMode;
+        private BoundGetter bgBcmDrvSeatOpt;
+        private BoundGetter bgBcmAstSeatOpt;
+        private BoundGetter bgBcmRlSeatOpt;
+        private BoundGetter bgBcmRrSeatOpt;
+        private BoundGetter bgUsmDrvSeatOpt;
+        private BoundGetter bgUsmAstSeatOpt;
+        private BoundGetter bgUsmRlSeatOpt;
+        private BoundGetter bgUsmRrSeatOpt;
 
         private String statusText = "uninitialized";
         private String buildText = "unknown";
@@ -1417,6 +1590,7 @@ public final class OccupantSignalProbe {
         @Override
         public CabinState readCabinState() {
             PassengerPresence passenger;
+            SeatCapabilities seatCaps;
             int ignOn;
             int ign3On;
             int avAwake;
@@ -1430,6 +1604,20 @@ public final class OccupantSignalProbe {
                 int belt = invokeIntGetter(bgAsstBelt, -1);
                 int passOcc = invokeIntGetter(bgPassStOcc, -1);
                 passenger = PassengerPresence.fromRaw(occ, cls, belt, passOcc);
+
+                int drvOpt = SeatCapabilities.pickOption(
+                        invokeIntGetter(bgBcmDrvSeatOpt, -1),
+                        invokeIntGetter(bgUsmDrvSeatOpt, -1));
+                int astOpt = SeatCapabilities.pickOption(
+                        invokeIntGetter(bgBcmAstSeatOpt, -1),
+                        invokeIntGetter(bgUsmAstSeatOpt, -1));
+                int rlOpt = SeatCapabilities.pickOption(
+                        invokeIntGetter(bgBcmRlSeatOpt, -1),
+                        invokeIntGetter(bgUsmRlSeatOpt, -1));
+                int rrOpt = SeatCapabilities.pickOption(
+                        invokeIntGetter(bgBcmRrSeatOpt, -1),
+                        invokeIntGetter(bgUsmRrSeatOpt, -1));
+                seatCaps = SeatCapabilities.fromRawOptions(drvOpt, astOpt, rlOpt, rrOpt);
 
                 ignOn = invokeIntGetter(bgBcmIgnStatus, -1);
                 ign3On = invokeIntGetter(bgDatcIgn3Status, -1);
@@ -1466,7 +1654,8 @@ public final class OccupantSignalProbe {
                 }
             }
             return new CabinState(
-                    passenger, tempF, tempC, wheel, ignOn, ign3On, avAwake, mobisSleeping, sentinel);
+                    passenger, tempF, tempC, wheel,
+                    ignOn, ign3On, avAwake, mobisSleeping, sentinel, seatCaps);
         }
 
         @Override
@@ -1586,6 +1775,14 @@ public final class OccupantSignalProbe {
             bgBlackScreenShown = null;
             bgAvPowerOff = null;
             bgDisplayOffMode = null;
+            bgBcmDrvSeatOpt = null;
+            bgBcmAstSeatOpt = null;
+            bgBcmRlSeatOpt = null;
+            bgBcmRrSeatOpt = null;
+            bgUsmDrvSeatOpt = null;
+            bgUsmAstSeatOpt = null;
+            bgUsmRlSeatOpt = null;
+            bgUsmRrSeatOpt = null;
             buildText = readSanitizedBuildInfo();
 
             try {
@@ -1830,6 +2027,22 @@ public final class OccupantSignalProbe {
                     bgAvPowerOff = bg;
                 } else if ("POWER.isDisplayOffMode".equals(key)) {
                     bgDisplayOffMode = bg;
+                } else if ("BCM.getDrvSeatHeatOption".equals(key)) {
+                    bgBcmDrvSeatOpt = bg;
+                } else if ("BCM.getAstSeatHeatOption".equals(key)) {
+                    bgBcmAstSeatOpt = bg;
+                } else if ("BCM.getRLSeatHeatOption".equals(key)) {
+                    bgBcmRlSeatOpt = bg;
+                } else if ("BCM.getRRSeatHeatOption".equals(key)) {
+                    bgBcmRrSeatOpt = bg;
+                } else if ("USM.getFrontSeatHeat_DrvOption".equals(key)) {
+                    bgUsmDrvSeatOpt = bg;
+                } else if ("USM.getFrontSeatHeat_AstOption".equals(key)) {
+                    bgUsmAstSeatOpt = bg;
+                } else if ("USM.getRearSeatHeat_LeftOption".equals(key)) {
+                    bgUsmRlSeatOpt = bg;
+                } else if ("USM.getRearSeatHeat_RightOption".equals(key)) {
+                    bgUsmRrSeatOpt = bg;
                 }
             }
 

@@ -1,6 +1,7 @@
 package dev.lemoyne.comfort;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
@@ -26,6 +27,7 @@ import java.util.Map;
  */
 public final class ComfortEngine {
     private static final String TAG = "HmgComfort";
+    private static final String HW_PREFS = "comfort_hw_caps";
     static final String[] READ_KEYS = {
         "hv.ready", "gear.park", "charging", "outside_temp_f", "outside_temp", "wheel_heat",
         "seat_heat.driver", "seat_heat.passenger", "seat_heat.rear_left", "seat_heat.rear_right",
@@ -42,6 +44,7 @@ public final class ComfortEngine {
         public final Map<String, String> readings;
         public final OccupantSignalProbe.PassengerPresence passengerPresence;
         public final OccupantSignalProbe.CabinState cabinState;
+        public final OccupantSignalProbe.SeatCapabilities seatCaps;
         public final String lastClimateStatus;
         public final String lastWelcomeStatus;
         public final boolean connected;
@@ -51,6 +54,7 @@ public final class ComfortEngine {
                 Map<String, String> readings,
                 OccupantSignalProbe.PassengerPresence passengerPresence,
                 OccupantSignalProbe.CabinState cabinState,
+                OccupantSignalProbe.SeatCapabilities seatCaps,
                 String lastClimateStatus,
                 String lastWelcomeStatus,
                 boolean connected) {
@@ -62,6 +66,9 @@ public final class ComfortEngine {
             this.cabinState = cabinState == null
                     ? OccupantSignalProbe.CabinState.UNAVAILABLE
                     : cabinState;
+            this.seatCaps = seatCaps == null
+                    ? OccupantSignalProbe.SeatCapabilities.UNKNOWN
+                    : seatCaps;
             this.lastClimateStatus = lastClimateStatus;
             this.lastWelcomeStatus = lastWelcomeStatus;
             this.connected = connected;
@@ -150,6 +157,8 @@ public final class ComfortEngine {
             OccupantSignalProbe.PassengerPresence.UNAVAILABLE;
     private volatile OccupantSignalProbe.CabinState lastCabinState =
             OccupantSignalProbe.CabinState.UNAVAILABLE;
+    private volatile OccupantSignalProbe.SeatCapabilities seatCaps =
+            OccupantSignalProbe.SeatCapabilities.UNKNOWN;
     private volatile String lastClimateStatus = "Waiting for vehicle start";
     private volatile String lastWelcomeStatus = "Armed for startup";
     private volatile boolean connected;
@@ -170,6 +179,39 @@ public final class ComfortEngine {
 
     private ComfortEngine(Context appContext) {
         this.appContext = appContext;
+        this.seatCaps = loadCachedSeatCapabilities(appContext);
+    }
+
+    private static OccupantSignalProbe.SeatCapabilities loadCachedSeatCapabilities(Context ctx) {
+        if (ctx == null) return OccupantSignalProbe.SeatCapabilities.UNKNOWN;
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(HW_PREFS, Context.MODE_PRIVATE);
+            return new OccupantSignalProbe.SeatCapabilities(
+                    sp.getInt("front_vent", -1),
+                    sp.getInt("rear_left_heat", -1),
+                    sp.getInt("rear_right_heat", -1));
+        } catch (Throwable ignored) {
+            return OccupantSignalProbe.SeatCapabilities.UNKNOWN;
+        }
+    }
+
+    private void updateSeatCapabilities(OccupantSignalProbe.SeatCapabilities live) {
+        if (live == null) return;
+        OccupantSignalProbe.SeatCapabilities prev = this.seatCaps;
+        OccupantSignalProbe.SeatCapabilities next = prev.mergeKnown(live);
+        if (!next.equals(prev)) {
+            this.seatCaps = next;
+            try {
+                SharedPreferences sp = appContext.getSharedPreferences(HW_PREFS, Context.MODE_PRIVATE);
+                sp.edit()
+                        .putInt("front_vent", next.frontVent)
+                        .putInt("rear_left_heat", next.rearLeftHeat)
+                        .putInt("rear_right_heat", next.rearRightHeat)
+                        .apply();
+            } catch (Throwable ignored) {
+            }
+            Log.i(TAG, "[hmgapi-comfort] detected seat hardware capabilities: " + next.summary());
+        }
     }
 
     public synchronized void ensureStarted() {
@@ -208,7 +250,8 @@ public final class ComfortEngine {
 
     public Snapshot snapshot() {
         return new Snapshot(config, new LinkedHashMap<String, String>(lastReadings),
-                lastPassengerPresence, lastCabinState, lastClimateStatus, lastWelcomeStatus, connected);
+                lastPassengerPresence, lastCabinState, seatCaps,
+                lastClimateStatus, lastWelcomeStatus, connected);
     }
 
     public void setUiForeground(boolean foreground) {
@@ -296,6 +339,7 @@ public final class ComfortEngine {
         if (cabin == null) {
             cabin = OccupantSignalProbe.CabinState.UNAVAILABLE;
         }
+        updateSeatCapabilities(cabin.seatCaps);
         Map<String, String> merged = ComfortPolicy.mergeCabinFallback(raw, cabin);
         lastReadings = merged;
         lastCabinState = cabin;
@@ -331,6 +375,13 @@ public final class ComfortEngine {
                 driveTracker.onWakeSeqCheck(wakeSeq);
                 welcomeTracker.onSuspendCheck(sleepGap, now);
                 welcomeTracker.onWakeSeqCheck(wakeSeq, now);
+
+                if (seatCaps.frontVent == -1 || seatCaps.rearLeftHeat == -1 || seatCaps.rearRightHeat == -1) {
+                    OccupantSignalProbe.CabinState earlyCabin = occupancyClient.queryCabinState();
+                    if (earlyCabin != null) {
+                        updateSeatCapabilities(earlyCabin.seatCaps);
+                    }
+                }
 
                 HmgApi api = HmgApi.connect().timeout(5000);
                 HmgApi.Result who;
@@ -633,15 +684,19 @@ public final class ComfortEngine {
                 && !presence.available) {
             for (int i = 0; i < 5 && running && !presence.available; i++) {
                 sleepQuietly(500);
-                cabin = occupancyClient.queryCabinState();
-                presence = cabin.passenger;
+                OccupantSignalProbe.CabinState refreshed = occupancyClient.queryCabinState();
+                if (refreshed != null) {
+                    cabin = refreshed;
+                    updateSeatCapabilities(cabin.seatCaps);
+                    presence = cabin.passenger;
+                }
             }
         }
         lastCabinState = cabin;
         lastPassengerPresence = presence;
 
         tempTimeoutRetries = 0;
-        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v, presence);
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v, presence, seatCaps);
         if (plan.actions.isEmpty()) {
             driveTracker.markCompleted();
             boardingTracker.onSessionClimateEvaluated(config, presence);
@@ -668,7 +723,7 @@ public final class ComfortEngine {
         if (Float.isNaN(tempF)) {
             return;
         }
-        ComfortPolicy.Plan plan = ComfortPolicy.evaluatePassengerBoarding(config, tempF, v, presence);
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluatePassengerBoarding(config, tempF, v, presence, seatCaps);
         boardingTracker.markBoardingHandled();
         if (plan.actions.isEmpty()) {
             Log.i(TAG, "[hmgapi-comfort] " + plan.summary);

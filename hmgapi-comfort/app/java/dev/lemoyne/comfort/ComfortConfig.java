@@ -102,6 +102,64 @@ public final class ComfortConfig {
                 false);
     }
 
+    public ComfortConfig withAdjustedThreshold(int which, int delta) {
+        int hh = heatHighF, hm = heatMedF, hl = heatLowF, wf = wheelF;
+        int vl = ventLowF, vm = ventMedF, vh = ventHighF;
+        if (which == 0) {
+            hh = clamp(hh + delta, -30, 80);
+            if (hm < hh) hm = hh;
+            if (hl < hm) hl = hm;
+            if (vl < hl + 5) vl = hl + 5;
+            if (vm < vl) vm = vl;
+            if (vh < vm) vh = vm;
+        } else if (which == 1) {
+            hm = clamp(hm + delta, -30, 85);
+            if (hh > hm) hh = hm;
+            if (hl < hm) hl = hm;
+            if (vl < hl + 5) vl = hl + 5;
+            if (vm < vl) vm = vl;
+            if (vh < vm) vh = vm;
+        } else if (which == 2) {
+            hl = clamp(hl + delta, -30, 90);
+            if (hm > hl) hm = hl;
+            if (hh > hm) hh = hm;
+            if (vl < hl + 5) vl = hl + 5;
+            if (vm < vl) vm = vl;
+            if (vh < vm) vh = vm;
+        } else if (which == 3) {
+            wf = clamp(wf + delta, -30, 90);
+        } else if (which == 4) {
+            vl = clamp(vl + delta, 60, 120);
+            if (hl > vl - 5) hl = vl - 5;
+            if (hm > hl) hm = hl;
+            if (hh > hm) hh = hm;
+            if (vm < vl) vm = vl;
+            if (vh < vm) vh = vm;
+        } else if (which == 5) {
+            vm = clamp(vm + delta, 60, 125);
+            if (vl > vm) vl = vm;
+            if (hl > vl - 5) hl = vl - 5;
+            if (hm > hl) hm = hl;
+            if (hh > hm) hh = hm;
+            if (vh < vm) vh = vm;
+        } else if (which == 6) {
+            vh = clamp(vh + delta, 60, 130);
+            if (vm > vh) vm = vh;
+            if (vl > vm) vl = vm;
+            if (hl > vl - 5) hl = vl - 5;
+            if (hm > hl) hm = hl;
+            if (hh > hm) hh = hm;
+        }
+        return new ComfortConfig(
+                welcomeDismiss, welcomeDelayMs,
+                climateEnabled, hh, hm, hl,
+                wheelEnabled, wf,
+                passengerPolicy, passengerAutoDetect,
+                rearLeftPolicy, rearRightPolicy,
+                ventEnabled, vl, vm, vh,
+                toastOnApply);
+    }
+
     public static String normPolicy(String p) {
         if (POLICY_MATCH.equals(p) || POLICY_LOWER.equals(p)) return p;
         return POLICY_OFF;

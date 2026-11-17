@@ -415,10 +415,11 @@ final class ComfortWidgets {
         }
     }
 
-    /** Seasonal temperature spectrum bar (-5°F .. 115°F) showing heating/neutral/ventilation zones & live ambient temp. */
+    /** Seasonal temperature spectrum bar showing heating/neutral/ventilation zones & live ambient temp. */
     static final class SpectrumBarView extends View {
         private static final float MIN_F = -5f;
-        private static final float MAX_F = 115f;
+        private static final float MAX_F_WITH_VENT = 115f;
+        private static final float MAX_F_HEAT_ONLY = 100f;
 
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -428,6 +429,7 @@ final class ComfortWidgets {
         private final float sp;
         private ComfortConfig cfg = ComfortConfig.defaults();
         private float ambientF = Float.NaN;
+        private boolean ventSupported = true;
 
         SpectrumBarView(Context c) {
             super(c);
@@ -438,8 +440,13 @@ final class ComfortWidgets {
         }
 
         void update(ComfortConfig nextCfg, float nextAmbientF) {
+            update(nextCfg, nextAmbientF, true);
+        }
+
+        void update(ComfortConfig nextCfg, float nextAmbientF, boolean nextVentSupported) {
             this.cfg = nextCfg;
             this.ambientF = nextAmbientF;
+            this.ventSupported = nextVentSupported;
             invalidate();
         }
 
@@ -449,9 +456,9 @@ final class ComfortWidgets {
             setMeasuredDimension(w, Math.round(54 * d));
         }
 
-        private float xFor(float tempF, float left, float width) {
-            float clamped = Math.max(MIN_F, Math.min(MAX_F, tempF));
-            return left + ((clamped - MIN_F) / (MAX_F - MIN_F)) * width;
+        private float xFor(float tempF, float left, float width, float maxF) {
+            float clamped = Math.max(MIN_F, Math.min(maxF, tempF));
+            return left + ((clamped - MIN_F) / (maxF - MIN_F)) * width;
         }
 
         @Override
@@ -463,13 +470,14 @@ final class ComfortWidgets {
             float barTop = 20f * d;
             float barBot = 34f * d;
             float barR = (barBot - barTop) * 0.5f;
+            float maxF = ventSupported ? MAX_F_WITH_VENT : MAX_F_HEAT_ONLY;
 
-            float xHH = xFor(cfg.heatHighF, left, width);
-            float xHM = xFor(cfg.heatMedF, left, width);
-            float xHL = xFor(cfg.heatLowF, left, width);
-            float xVL = xFor(cfg.ventLowF, left, width);
-            float xVM = xFor(cfg.ventMedF, left, width);
-            float xVH = xFor(cfg.ventHighF, left, width);
+            float xHH = xFor(cfg.heatHighF, left, width, maxF);
+            float xHM = xFor(cfg.heatMedF, left, width, maxF);
+            float xHL = xFor(cfg.heatLowF, left, width, maxF);
+            float xVL = xFor(cfg.ventLowF, left, width, maxF);
+            float xVM = xFor(cfg.ventMedF, left, width, maxF);
+            float xVH = xFor(cfg.ventHighF, left, width, maxF);
 
             // Clip to full stadium pill for crisp outer corners
             c.save();
@@ -481,11 +489,15 @@ final class ComfortWidgets {
             drawBand(c, left, xHH, barTop, barBot, cfg.climateEnabled ? PRIMARY : SURFACE_HIGHEST);
             drawBand(c, xHH, xHM, barTop, barBot, cfg.climateEnabled ? blendColor(PRIMARY, PRIMARY_CONT, 0.42f) : SURFACE_HIGHEST);
             drawBand(c, xHM, xHL, barTop, barBot, cfg.climateEnabled ? PRIMARY_CONT : SURFACE_HIGHEST);
-            drawBand(c, xHL, xVL, barTop, barBot, SURFACE_HIGHEST);
-            boolean ventOn = cfg.climateEnabled && cfg.ventEnabled;
-            drawBand(c, xVL, xVM, barTop, barBot, ventOn ? TERTIARY_CONT : SURFACE_HIGHEST);
-            drawBand(c, xVM, xVH, barTop, barBot, ventOn ? blendColor(TERTIARY, TERTIARY_CONT, 0.42f) : SURFACE_HIGHEST);
-            drawBand(c, xVH, right, barTop, barBot, ventOn ? TERTIARY : SURFACE_HIGHEST);
+            if (ventSupported) {
+                drawBand(c, xHL, xVL, barTop, barBot, SURFACE_HIGHEST);
+                boolean ventOn = cfg.climateEnabled && cfg.ventEnabled;
+                drawBand(c, xVL, xVM, barTop, barBot, ventOn ? TERTIARY_CONT : SURFACE_HIGHEST);
+                drawBand(c, xVM, xVH, barTop, barBot, ventOn ? blendColor(TERTIARY, TERTIARY_CONT, 0.42f) : SURFACE_HIGHEST);
+                drawBand(c, xVH, right, barTop, barBot, ventOn ? TERTIARY : SURFACE_HIGHEST);
+            } else {
+                drawBand(c, xHL, right, barTop, barBot, SURFACE_HIGHEST);
+            }
             c.restore();
 
             // Subtle border around spectrum track
@@ -499,8 +511,12 @@ final class ComfortWidgets {
             textPaint.setTextSize(11f * sp);
             textPaint.setTextAlign(Paint.Align.CENTER);
             textPaint.setColor(ON_SURFACE_VAR);
-            float[] xs = { xHH, xHM, xHL, xVL, xVM, xVH };
-            int[] vals = { cfg.heatHighF, cfg.heatMedF, cfg.heatLowF, cfg.ventLowF, cfg.ventMedF, cfg.ventHighF };
+            float[] xs = ventSupported
+                    ? new float[] { xHH, xHM, xHL, xVL, xVM, xVH }
+                    : new float[] { xHH, xHM, xHL };
+            int[] vals = ventSupported
+                    ? new int[] { cfg.heatHighF, cfg.heatMedF, cfg.heatLowF, cfg.ventLowF, cfg.ventMedF, cfg.ventHighF }
+                    : new int[] { cfg.heatHighF, cfg.heatMedF, cfg.heatLowF };
             float lastDrawnX = -999f;
             float minGap = 28f * d;
             for (int i = 0; i < xs.length; i++) {
@@ -515,7 +531,7 @@ final class ComfortWidgets {
 
             // Live outside_temp_f marker above bar
             if (!Float.isNaN(ambientF)) {
-                float mx = xFor(ambientF, left, width);
+                float mx = xFor(ambientF, left, width, maxF);
                 String tag = Math.round(ambientF) + "°F Now";
                 textPaint.setTextSize(11.5f * sp);
                 float tw = textPaint.measureText(tag) + 12f * d;
@@ -540,13 +556,19 @@ final class ComfortWidgets {
                 textPaint.setTextAlign(Paint.Align.LEFT);
                 c.drawText("Winter Heating", left + 2f * d, 13.5f * d, textPaint);
 
-                textPaint.setColor(ON_SURFACE_VAR);
-                textPaint.setTextAlign(Paint.Align.CENTER);
-                c.drawText("Comfort Zone", (xHL + xVL) * 0.5f, 13.5f * d, textPaint);
+                if (ventSupported) {
+                    textPaint.setColor(ON_SURFACE_VAR);
+                    textPaint.setTextAlign(Paint.Align.CENTER);
+                    c.drawText("Comfort Zone", (xHL + xVL) * 0.5f, 13.5f * d, textPaint);
 
-                textPaint.setColor(TERTIARY);
-                textPaint.setTextAlign(Paint.Align.RIGHT);
-                c.drawText("Summer Ventilation", right - 2f * d, 13.5f * d, textPaint);
+                    textPaint.setColor(TERTIARY);
+                    textPaint.setTextAlign(Paint.Align.RIGHT);
+                    c.drawText("Summer Ventilation", right - 2f * d, 13.5f * d, textPaint);
+                } else {
+                    textPaint.setColor(ON_SURFACE_VAR);
+                    textPaint.setTextAlign(Paint.Align.RIGHT);
+                    c.drawText("Comfort Zone", right - 2f * d, 13.5f * d, textPaint);
+                }
             }
         }
 

@@ -578,6 +578,110 @@ public final class ComfortPolicyTest {
         check("turning off Ignition while remaining plugged in re-arms for next wake", true,
                 qbChargeDt.shouldTrigger(pluggedAcc, true, 1));
 
+        // 21. Optional seat hardware auto-detection (BCM/USM SeatCapabilities) & policy gating
+        OccupantSignalProbe.SeatCapabilities preCanCaps =
+                OccupantSignalProbe.SeatCapabilities.fromRawOptions(0, 0, 0, 0);
+        check("pre-CAN (0,0,0,0) remains UNKNOWN so controls never hide prematurely",
+                "vent=-,rl=-,rr=-/true/true",
+                preCanCaps.summary() + "/" + preCanCaps.isFrontVentSupported() + "/"
+                        + preCanCaps.hasAnyRearHeatSupported());
+
+        OccupantSignalProbe.SeatCapabilities sentinelCaps =
+                OccupantSignalProbe.SeatCapabilities.fromRawOptions(255, -1, 0, 0);
+        check("sentinel (255,-1,0,0) remains UNKNOWN",
+                OccupantSignalProbe.SeatCapabilities.UNKNOWN, sentinelCaps);
+
+        OccupantSignalProbe.SeatCapabilities ioniq5SelCaps =
+                OccupantSignalProbe.SeatCapabilities.fromRawOptions(2, 2, 0, 0);
+        check("Ioniq 5 SEL (2,2,0,0) detects no front vent & no rear heaters",
+                "vent=0,rl=0,rr=0/false/false",
+                ioniq5SelCaps.summary() + "/" + ioniq5SelCaps.isFrontVentSupported() + "/"
+                        + ioniq5SelCaps.hasAnyRearHeatSupported());
+
+        OccupantSignalProbe.SeatCapabilities ev6GtLineCaps =
+                OccupantSignalProbe.SeatCapabilities.fromRawOptions(6, 6, 1, 1);
+        check("EV6 GT-Line / Ioniq 5 Limited (6,6,1,1) detects front vent & 2-step rear heaters",
+                "vent=1,rl=1,rr=1/true/true",
+                ev6GtLineCaps.summary() + "/" + ev6GtLineCaps.isFrontVentSupported() + "/"
+                        + ev6GtLineCaps.hasAnyRearHeatSupported());
+
+        OccupantSignalProbe.SeatCapabilities usmFallbackCaps =
+                OccupantSignalProbe.SeatCapabilities.fromSignalMap(state(
+                        "BCM.getDrvSeatHeatOption", "-1",
+                        "USM.getFrontSeatHeat_DrvOption", "2",
+                        "BCM.getAstSeatHeatOption", "0",
+                        "USM.getFrontSeatHeat_AstOption", "2",
+                        "BCM.getRLSeatHeatOption", "0",
+                        "BCM.getRRSeatHeatOption", "0"));
+        check("USM option fallback resolves front heater-only & absent rear heaters",
+                ioniq5SelCaps, usmFallbackCaps);
+
+        check("mergeKnown preserves cached capabilities across pre-CAN UNKNOWN reads",
+                ioniq5SelCaps, ioniq5SelCaps.mergeKnown(OccupantSignalProbe.SeatCapabilities.UNKNOWN));
+
+        OccupantSignalProbe.CabinState cabinWithCaps = new OccupantSignalProbe.CabinState(
+                soloEmpty, "34.0", "1.1", "0", 1, 1, 1, 0, false, ioniq5SelCaps);
+        OccupantSignalProbe.CabinState cabinCapsDecoded =
+                OccupantSignalProbe.CabinState.decode(cabinWithCaps.encode());
+        check("CabinState 10-field encode/decode preserves SeatCapabilities",
+                ioniq5SelCaps, cabinCapsDecoded.seatCaps);
+
+        String legacy9Field = soloEmpty.encode() + "\t34.0\t1.1\t0\t1\t1\t1\t0\t0";
+        check("CabinState 9-field legacy decode defaults seatCaps to UNKNOWN",
+                OccupantSignalProbe.SeatCapabilities.UNKNOWN,
+                OccupantSignalProbe.CabinState.decode(legacy9Field).seatCaps);
+
+        ComfortPolicy.Plan noVentSummer = ComfortPolicy.evaluateClimate(
+                fam, 88.0f, state("seat_state.driver", "2", "seat_state.passenger", "2"),
+                seatedBuckled, ioniq5SelCaps);
+        check("evaluateClimate skips seat_vent at 88 F when frontVent is absent",
+                "", actions(noVentSummer.actions));
+
+        ComfortPolicy.Plan noRearWinter = ComfortPolicy.evaluateClimate(
+                fam, 20.0f, state("seat_state.driver", "2", "seat_state.passenger", "2", "wheel_heat", "0"),
+                seatedBuckled, ioniq5SelCaps);
+        check("evaluateClimate skips rear_left & rear_right seat_heat when rear heaters are absent",
+                "seat_heat driver high | seat_heat passenger high | wheel_heat on",
+                actions(noRearWinter.actions));
+
+        ComfortPolicy.Plan noVentBoarding = ComfortPolicy.evaluatePassengerBoarding(
+                autoPass, 88.0f, state("seat_state.passenger", "2"), seatedBuckled, ioniq5SelCaps);
+        check("evaluatePassengerBoarding skips seat_vent when frontVent is absent",
+                "", actions(noVentBoarding.actions));
+
+        ComfortPolicy.Plan okHeatBoarding = ComfortPolicy.evaluatePassengerBoarding(
+                autoPass, 24.0f, state("seat_state.passenger", "2"), seatedBuckled, ioniq5SelCaps);
+        check("evaluatePassengerBoarding still warms front passenger in winter when frontVent is absent",
+                "seat_heat passenger high", actions(okHeatBoarding.actions));
+
+        // 22. 1 F temperature threshold steppers & bidirectional tier cascading
+        check("threshold +1 F increments heatHighF by 1", 26, def.withAdjustedThreshold(0, 1).heatHighF);
+        check("threshold -1 F decrements heatHighF by 1", 24, def.withAdjustedThreshold(0, -1).heatHighF);
+        check("threshold +1 F increments wheelF by 1", 46, def.withAdjustedThreshold(3, 1).wheelF);
+        check("threshold -1 F decrements ventLowF by 1", 74, def.withAdjustedThreshold(4, -1).ventLowF);
+
+        ComfortConfig tiedCold = new ComfortConfig(
+                true, 800, true, 38, 38, 50, true, 45,
+                ComfortConfig.POLICY_OFF, true, ComfortConfig.POLICY_OFF, ComfortConfig.POLICY_OFF,
+                true, 75, 85, 95, false);
+        ComfortConfig pushedUp = tiedCold.withAdjustedThreshold(0, 1);
+        check("raising heatHighF past heatMedF cascades heatMedF up by 1 F",
+                "39/39", pushedUp.heatHighF + "/" + pushedUp.heatMedF);
+        ComfortConfig pushedDown = tiedCold.withAdjustedThreshold(1, -1);
+        check("lowering heatMedF below heatHighF cascades heatHighF down by 1 F",
+                "37/37", pushedDown.heatHighF + "/" + pushedDown.heatMedF);
+
+        ComfortConfig tightGap = new ComfortConfig(
+                true, 800, true, 25, 38, 70, true, 45,
+                ComfortConfig.POLICY_OFF, true, ComfortConfig.POLICY_OFF, ComfortConfig.POLICY_OFF,
+                true, 75, 85, 95, false);
+        ComfortConfig gapUp = tightGap.withAdjustedThreshold(2, 1);
+        check("raising heatLowF into 5 F comfort buffer cascades ventLowF up by 1 F",
+                "71/76", gapUp.heatLowF + "/" + gapUp.ventLowF);
+        ComfortConfig gapDown = tightGap.withAdjustedThreshold(4, -1);
+        check("lowering ventLowF into 5 F comfort buffer cascades heatLowF down by 1 F",
+                "69/74", gapDown.heatLowF + "/" + gapDown.ventLowF);
+
         System.exit(fail);
     }
 
