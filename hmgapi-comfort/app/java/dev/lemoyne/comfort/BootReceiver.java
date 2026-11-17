@@ -7,7 +7,8 @@ import android.content.Intent;
 import hmgapi.client.HmgApi;
 
 /**
- * Starts {@link ComfortService} on cold boot, QuickBoot Mobis SCREEN_ON, or live mod enablement.
+ * Starts {@link ComfortService} on cold boot, APK update, QuickBoot Mobis SCREEN_ON, or live mod enablement.
+ * Treats transient hmgapid worker-busy (code 75) or socket timeouts on cold boot as startable rather than disabled.
  */
 public final class BootReceiver extends BroadcastReceiver {
     @Override
@@ -19,13 +20,18 @@ public final class BootReceiver extends BroadcastReceiver {
             @Override
             public void run() {
                 try {
-                    HmgApi api = HmgApi.connect().timeout(2000);
-                    if (!api.available() || api.mod() != null) {
+                    HmgApi api = HmgApi.connect().timeout(2500);
+                    if (!ComfortEngine.isModExplicitlyDisabled(api)) {
                         Intent svc = new Intent(context, ComfortService.class);
                         if (action != null) svc.setAction(action);
                         context.startService(svc);
                     }
                 } catch (Throwable ignored) {
+                    try {
+                        Intent svc = new Intent(context, ComfortService.class);
+                        if (action != null) svc.setAction(action);
+                        context.startService(svc);
+                    } catch (Throwable ignored2) {}
                 } finally {
                     try {
                         pending.finish();

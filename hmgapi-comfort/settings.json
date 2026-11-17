@@ -19,8 +19,8 @@
       "key": "climate_enabled",
       "type": "toggle",
       "default": true,
-      "title": "Auto seat & wheel climate on EV Ready",
-      "description": "Applies seat heat, steering wheel heat, or summer ventilation once per drive when EV Ready engages, preserving active Bluelink climate."
+      "title": "Auto seat & wheel climate on vehicle start",
+      "description": "Applies seat heat, steering wheel heat, or summer ventilation once per drive or plugged-in/Utility cabin session, preserving active Bluelink climate."
     },
     {
       "key": "heat_high_f",

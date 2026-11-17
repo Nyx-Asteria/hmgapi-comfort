@@ -135,7 +135,7 @@ public final class ComfortPolicy {
         notes.add(seat + ("seat_vent".equals(cmd) ? " vent " : " heat ") + lvl + (rear ? "" : ""));
     }
 
-    /** BCM seat_state: 2 is off, 3-5 ventilation, 6-8 heat; 0/15/- unknown. */
+    /** BCM seat_state: 2 is off, 3-5 ventilation, 6-8 heat; 0/15/- unknown or IG2 off. */
     public static boolean isSeatAlreadyActive(Map<String, String> readings, String seat) {
         if (readings == null) return false;
         String raw = readings.get("seat_state." + seat);
@@ -149,6 +149,107 @@ public final class ComfortPolicy {
         if (h != null && ("1".equals(h) || "2".equals(h) || "3".equals(h))) return true;
         String v = readings.get("seat_vent." + seat);
         return v != null && ("1".equals(v) || "2".equals(v) || "3".equals(v));
+    }
+
+    /**
+     * True when BCM reports a live powered seat climate controller state (2 = off/standby,
+     * 3-5 = ventilation, 6-8 = heat). When vehicle cabin/IG2 power is off (including unoccupied
+     * overnight charging or ACC-only) or CAN is still initializing on cold boot, BCM reports 0, 15, or "-".
+     */
+    public static boolean isBcmSeatClimateReady(Map<String, String> readings) {
+        if (readings == null) return false;
+        String raw = readings.get("seat_state.driver");
+        if (raw != null && !"-".equals(raw)) {
+            try {
+                int st = Integer.parseInt(raw.trim());
+                if (st >= 2 && st <= 8) return true;
+            } catch (NumberFormatException ignored) {}
+        }
+        String h = readings.get("seat_heat.driver");
+        return h != null && ("0".equals(h) || "1".equals(h) || "2".equals(h) || "3".equals(h));
+    }
+
+    /** True when HSCAN reports active AC or DC charging (> 0). */
+    public static boolean isChargingActive(Map<String, String> readings) {
+        if (readings == null) return false;
+        String raw = readings.get("charging");
+        if (raw == null || raw.isEmpty() || "-".equals(raw)) return false;
+        try {
+            return Integer.parseInt(raw.trim()) > 0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * True when the vehicle is in an active comfort session:
+     *   1. EV_RDY drive ready (hv.ready == "1"), OR
+     *   2. Powered Park cabin session (plugged-in Ignition ON / charging cabin session / Utility Mode / IG2 ON),
+     *      where E-GMP EVs keep hv.ready == "0" while tethered to a charger, gated on:
+     *        - head-unit display awake/interactive (blocks unoccupied overnight charging & remote Bluelink wakes),
+     *        - gear in Park ("1"), and
+     *        - BCM seat climate powered and ready (seat_state.driver in 2..8).
+     */
+    public static boolean isActiveClimateSession(Map<String, String> readings, boolean screenInteractive) {
+        if (readings == null) return false;
+        if ("1".equals(readings.get("hv.ready"))) return true;
+        return screenInteractive
+                && "1".equals(readings.get("gear.park"))
+                && isBcmSeatClimateReady(readings);
+    }
+
+    /**
+     * Verifies from live vehicle telemetry that a commanded climate action actually took effect in BCM/VR.
+     * Rejects uninitialized cold-boot states ("-", "0", "15") as well as off ("2") so early commands
+     * dropped while USM/VR/BCM finish booting are always retried.
+     */
+    public static boolean isActionConfirmed(Action act, Map<String, String> readings) {
+        if (act == null || readings == null) return false;
+        if ("wheel_heat".equals(act.command)) {
+            return "on".equals(act.target)
+                    ? "1".equals(readings.get("wheel_heat"))
+                    : "0".equals(readings.get("wheel_heat"));
+        }
+        String raw = readings.get("seat_state." + act.target);
+        int st = -1;
+        if (raw != null && !"-".equals(raw)) {
+            try {
+                st = Integer.parseInt(raw.trim());
+            } catch (NumberFormatException ignored) {}
+        }
+        if ("seat_heat".equals(act.command)) {
+            if (st >= 6 && st <= 8) return true;
+            String h = readings.get("seat_heat." + act.target);
+            return "1".equals(h) || "2".equals(h) || "3".equals(h);
+        }
+        if ("seat_vent".equals(act.command)) {
+            if (st >= 3 && st <= 5) return true;
+            String v = readings.get("seat_vent." + act.target);
+            return "1".equals(v) || "2".equals(v) || "3".equals(v);
+        }
+        return false;
+    }
+
+    /**
+     * True only when a command refusal is permanent (owner denied permission or seat lacks hardware);
+     * false for cold-boot/IPC transient errors ("vehicle service isn't running", "car's service failed",
+     * "no answer", "code 75", "waiting for the owner") so they stay queued for retry.
+     */
+    public static boolean isPermanentCommandRefusal(String message) {
+        if (message == null) return false;
+        return message.contains("didn't allow")
+                || message.contains("not declared in mod.json")
+                || message.contains("no ventilation")
+                || message.contains("unknown command");
+    }
+
+    /**
+     * True only when CAN positively confirms EV Ready propulsion with gear out of Park (R/N/D),
+     * preventing uninitialized cold-boot gear_p_status (0/-1) from prematurely aborting startup_notice.
+     */
+    public static boolean isConfirmedOutOfPark(Map<String, String> readings) {
+        if (readings == null) return false;
+        return "1".equals(readings.get("hv.ready")) && "0".equals(readings.get("gear.park"));
     }
 
     public static String levelName(int level) {
@@ -165,7 +266,8 @@ public final class ComfortPolicy {
     }
 
     /**
-     * Tracks EV_RDY drive sessions across cold boots, parked power-cycles, and QuickBoot STR suspends.
+     * Tracks EV_RDY and plugged-in/Utility cabin sessions across cold boots, parked power-cycles,
+     * QuickBoot power-offs, and QuickBoot STR suspends.
      */
     public static final class DriveTracker {
         private boolean appliedThisDrive;
@@ -189,19 +291,34 @@ public final class ComfortPolicy {
             lastWakeSeq = wakeSeq;
         }
 
-        /** Returns true when a new EV_RDY drive needs auto-climate evaluation. */
-        public synchronized boolean shouldTrigger(String hvReady) {
-            if ("1".equals(hvReady)) {
+        /** Resets session state on explicit QuickBoot vehicle power-off (QB_SLEEP / QB_POW_OFF). */
+        public synchronized void onPowerOff() {
+            appliedThisDrive = false;
+            offTicks = 0;
+        }
+
+        /** Returns true when a new EV_RDY drive or powered cabin session needs auto-climate evaluation. */
+        public synchronized boolean shouldTrigger(Map<String, String> readings, boolean screenInteractive) {
+            if (isActiveClimateSession(readings, screenInteractive)) {
                 offTicks = 0;
                 return !appliedThisDrive;
             }
-            if ("0".equals(hvReady)) {
+            String hvReady = readings == null ? null : readings.get("hv.ready");
+            if ("0".equals(hvReady) && !isBcmSeatClimateReady(readings)) {
                 offTicks++;
                 if (offTicks >= 2) {
                     appliedThisDrive = false;
                 }
             }
             return false;
+        }
+
+        /** Legacy single-signal helper for EV_RDY-only tests. */
+        public synchronized boolean shouldTrigger(String hvReady) {
+            Map<String, String> m = "1".equals(hvReady) || "0".equals(hvReady)
+                    ? Collections.singletonMap("hv.ready", hvReady)
+                    : Collections.<String, String>emptyMap();
+            return shouldTrigger(m, false);
         }
 
         public synchronized void markCompleted() {

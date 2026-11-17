@@ -124,6 +124,68 @@ public final class ComfortPolicyTest {
         wt.onSuspendCheck(300500L, 10000L);   // QuickBoot resume without broadcast
         check("QuickBoot STR resume re-arms welcome dismiss", true, wt.readyToDismiss(10800L, 800));
 
+        // 8. Plugged-in / Utility cabin sessions vs unoccupied charging, ACC-only, and remote Bluelink
+        ComfortPolicy.DriveTracker pdt = new ComfortPolicy.DriveTracker();
+        check("unoccupied overnight charging (IG2 off, screen off) ignored", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "0"), false));
+        check("ACC-only / IG2 off (seat_state=0) with screen on ignored", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "0", "gear.park", "1", "seat_state.driver", "0"), true));
+        check("cold-boot uninitialized BCM (seat_state=15) ignored", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "15"), true));
+        check("remote Bluelink while locked/dark screen ignored until owner wakes screen", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "8"), false));
+        check("plugged-in active charging cabin session triggers once screen wakes", true,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "2"), true));
+        pdt.markCompleted();
+        check("pressing Display Off mid-session does not reset completed cabin session", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "8"), false));
+        check("waking display in same plugged-in session does not double-fire", false,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "1", "gear.park", "1", "seat_state.driver", "8"), true));
+        check("unplugging directly into EV_RDY=1 in same session does not double-fire", false,
+                pdt.shouldTrigger(state("hv.ready", "1", "charging", "0", "gear.park", "1", "seat_state.driver", "8"), true));
+        pdt.onPowerOff();
+        check("plugged-in session after target SOC reached (charging=0, IG2 on) triggers", true,
+                pdt.shouldTrigger(state("hv.ready", "0", "charging", "0", "gear.park", "1", "seat_state.driver", "2"), true));
+
+        // 9. Closed-loop command verification rejects cold-boot "-", "0", "15", and "2"
+        ComfortPolicy.Action wheelOn = new ComfortPolicy.Action("wheel_heat", "on", "");
+        check("wheel_heat unconfirmed on cold-boot '-'", false, ComfortPolicy.isActionConfirmed(wheelOn, state("wheel_heat", "-")));
+        check("wheel_heat unconfirmed on '0'", false, ComfortPolicy.isActionConfirmed(wheelOn, state("wheel_heat", "0")));
+        check("wheel_heat confirmed on '1'", true, ComfortPolicy.isActionConfirmed(wheelOn, state("wheel_heat", "1")));
+
+        ComfortPolicy.Action driverHigh = new ComfortPolicy.Action("seat_heat", "driver", "high");
+        check("seat_heat unconfirmed on cold-boot '-'", false, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "-")));
+        check("seat_heat unconfirmed on cold-boot '0'", false, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "0")));
+        check("seat_heat unconfirmed on cold-boot '15'", false, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "15")));
+        check("seat_heat unconfirmed when still off ('2')", false, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "2")));
+        check("seat_heat unconfirmed when ventilating ('4')", false, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "4")));
+        check("seat_heat confirmed on BCM heat state ('8')", true, ComfortPolicy.isActionConfirmed(driverHigh, state("seat_state.driver", "8")));
+
+        ComfortPolicy.Action driverVent = new ComfortPolicy.Action("seat_vent", "driver", "medium");
+        check("seat_vent unconfirmed on '2'", false, ComfortPolicy.isActionConfirmed(driverVent, state("seat_state.driver", "2")));
+        check("seat_vent confirmed on BCM vent state ('4')", true, ComfortPolicy.isActionConfirmed(driverVent, state("seat_state.driver", "4")));
+
+        // 10. Cold-boot transient vs permanent refusals & confirmed out-of-Park guard
+        check("transient: vehicle service isn't running", false,
+                ComfortPolicy.isPermanentCommandRefusal("the vehicle service isn't running (yet)"));
+        check("transient: car's service failed on boot", false,
+                ComfortPolicy.isPermanentCommandRefusal("refused: the car's service failed (java.lang.IllegalStateException: no vrm service)"));
+        check("transient: hmgapid busy code 75", false,
+                ComfortPolicy.isPermanentCommandRefusal("hmgapid: code 75"));
+        check("permanent: owner denied command", true,
+                ComfortPolicy.isPermanentCommandRefusal("refused: the owner didn't allow wheel_heat for hmgapi-comfort"));
+        check("permanent: rear seat lacks ventilation", true,
+                ComfortPolicy.isPermanentCommandRefusal("refused: the rear seats have no ventilation"));
+
+        check("cold-boot uninitialized gear/hv is NOT confirmed out of Park", false,
+                ComfortPolicy.isConfirmedOutOfPark(state("hv.ready", "-", "gear.park", "-")));
+        check("hv.ready=0 with gear.park=0 is NOT confirmed out of Park", false,
+                ComfortPolicy.isConfirmedOutOfPark(state("hv.ready", "0", "gear.park", "0")));
+        check("hv.ready=1 in Park is NOT out of Park", false,
+                ComfortPolicy.isConfirmedOutOfPark(state("hv.ready", "1", "gear.park", "1")));
+        check("hv.ready=1 with gear.park=0 IS confirmed out of Park", true,
+                ComfortPolicy.isConfirmedOutOfPark(state("hv.ready", "1", "gear.park", "0")));
+
         System.exit(fail);
     }
 }

@@ -384,7 +384,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         bar.addView(actOverview);
 
         // Contextual status badge for Tab 1 (Climate)
-        lblClimateSummaryChip = statusChip("Enabled on EV Ready", OK_CONT, ON_OK_CONT);
+        lblClimateSummaryChip = statusChip("Auto Climate Active", OK_CONT, ON_OK_CONT);
         lblClimateSummaryChip.setPadding(d(14), d(7), d(14), d(7));
         headerActions[TAB_CLIMATE] = lblClimateSummaryChip;
         bar.addView(lblClimateSummaryChip);
@@ -430,7 +430,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             pageSubtitle.setText("Live cabin seat telemetry, recent actions, and startup safety screen dismissal");
         } else if (index == TAB_CLIMATE) {
             pageTitle.setText("Climate & Seats");
-            pageSubtitle.setText("Automatic EV Ready heating, summer ventilation, and companion seat policies");
+            pageSubtitle.setText("Automatic heating, summer ventilation, and companion seat policies on start or charging");
         } else {
             pageTitle.setText("Temperature Thresholds");
             pageSubtitle.setText("Outside temperature triggers (°F) for multi-stage heating and ventilation");
@@ -486,7 +486,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
 
         activityCard.addView(hairline(8));
 
-        lblClimateStatus = label("Waiting for EV Ready", 13.5f, ON_SURFACE, false);
+        lblClimateStatus = label("Waiting for vehicle start", 13.5f, ON_SURFACE, false);
         lblClimateStatus.setMaxLines(2);
         lblClimateStatus.setEllipsize(TextUtils.TruncateAt.END);
         lblClimateTime = statusChip("--:--", SURFACE_HIGH, ON_SURFACE_VAR);
@@ -585,7 +585,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         // Left Card: Automatic Climate Feature Switches
         LinearLayout featCard = m3Card();
         featCard.addView(cardHeader(ComfortIcons.AUTO_CLIMATE, PRIMARY_CONT, ON_PRIMARY_CONT,
-                "Automatic Climate", "Triggered once per drive on EV Ready"));
+                "Automatic Climate", "Triggered on EV Ready & plugged-in cabin sessions"));
 
         swClimate = new ComfortWidgets.M3Switch(this, current.climateEnabled, new ComfortWidgets.ToggleListener() {
             @Override
@@ -598,7 +598,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
             }
         });
         LinearLayout r1 = switchRow(ComfortIcons.PLAY_BOLT, PRIMARY_CONT, ON_PRIMARY_CONT,
-                "Auto seat & wheel climate", "Evaluate ambient temperature on EV Ready", swClimate);
+                "Auto seat & wheel climate", "Evaluate ambient temp on EV Ready & plugged-in cabin power", swClimate);
         LinearLayout.LayoutParams r1Lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         r1Lp.topMargin = d(10);
@@ -773,7 +773,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         summerCard.addView(thresholdRow("Front High (Level 3)", "≥ Peak heat tier", lblVentHigh, 6, 0));
 
         TextView note = label(
-                "Active Bluelink remote climate is automatically preserved when entering EV Ready.",
+                "Active Bluelink remote climate is automatically preserved when starting or entering the cabin.",
                 12f, ON_SURFACE_VAR, false);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -916,8 +916,12 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
 
         // Powertrain & wheel chips
         boolean evReady = r != null && "1".equals(r.get("hv.ready"));
+        boolean charging = ComfortPolicy.isChargingActive(r);
+        boolean cabinOn = ComfortPolicy.isBcmSeatClimateReady(r);
         boolean evOff = r != null && "0".equals(r.get("hv.ready"));
         if (evReady) styleChip(chipEv, "EV Ready", OK_CONT, ON_OK_CONT);
+        else if (charging) styleChip(chipEv, "Charging", TERTIARY_CONT, ON_TERTIARY_CONT);
+        else if (cabinOn) styleChip(chipEv, "Cabin On", SECONDARY_CONT, ON_SECONDARY_CONT);
         else styleChip(chipEv, evOff ? "Standby" : "EV --", SURFACE_HIGH, ON_SURFACE_VAR);
 
         boolean inPark = r != null && "1".equals(r.get("gear.park"));
@@ -979,7 +983,7 @@ public final class MainActivity extends Activity implements ComfortEngine.Listen
         swToast.setChecked(c.toastOnApply, false);
 
         if (c.climateEnabled) {
-            styleChip(lblClimateSummaryChip, "Active on EV Ready", OK_CONT, ON_OK_CONT);
+            styleChip(lblClimateSummaryChip, "Auto Climate Active", OK_CONT, ON_OK_CONT);
         } else {
             styleChip(lblClimateSummaryChip, "Auto Climate Off", SURFACE_HIGH, ON_SURFACE_VAR);
         }

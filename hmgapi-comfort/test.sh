@@ -7,6 +7,8 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 R=$T/root
 . "${HMGAPI_SDK:?set HMGAPI_SDK to the unpacked mod SDK}/test/lib.sh"
 
+sh "$M/tools/unit/test.sh"
+
 mkdir -p "$R/system" "$R/data/hmgapi/settings"
 printf 'ro.board.platform=tcc803x\n' > "$R/props.txt"
 
@@ -51,7 +53,7 @@ has "starter registered in services.txt as system" "hmgapi-comfort starter syste
 for cmd in startup_notice seat_heat seat_vent wheel_heat; do
     has "$cmd in commands.txt" "hmgapi-comfort $cmd" "$(cat "$R/data/hmgapi/state/commands.txt")"
 done
-for sig in hv.ready gear.park outside_temp_f wheel_heat seat_state.driver; do
+for sig in hv.ready gear.park charging outside_temp_f wheel_heat seat_state.driver; do
     has "$sig in vehicle.txt" "hmgapi-comfort $sig" "$(cat "$R/data/hmgapi/state/vehicle.txt")"
 done
 

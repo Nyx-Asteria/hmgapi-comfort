@@ -14,15 +14,16 @@ Automatically dismisses the infotainment startup confirmation screen across cold
   - Lightweight boot-stage daemon (`start: "boot"`) that dismisses the infotainment consent notice within milliseconds of `sys.boot_completed=1` on cold boot and within `150 ms` on QuickBoot suspend-to-RAM resume—only while safely in Park (`P`).
   - Configurable **Dismiss Delay (`0–2500 ms`)** if you prefer a brief pause after wake.
 - **3-Tier Cold-Weather Seat & Steering Wheel Warming**
-  - Independent outside-temperature thresholds for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 40 °F` → L2, `≤ 55 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 48 °F`).
-  - Ignores raw `-40 °F` pre-CAN wake sentinels and **never overrides** manual seat/wheel changes you've already made on the current drive.
+  - Independent outside-temperature thresholds for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 38 °F` → L2, `≤ 50 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 45 °F`).
+  - Activates both on **EV Ready** drive starts and during **plugged-in / charging / Utility Mode** cabin sessions when you turn the vehicle ON in Park—while staying completely silent during unoccupied overnight charging or dark-screen remote Bluelink wakes.
+  - Ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR across cold-boot initialization, and **never overrides** active Bluelink or manual seat/wheel settings.
 - **3-Tier Warm-Weather Front Seat Ventilation**
-  - Automatic summer seat cooling thresholds for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 90 °F` → L3, `≥ 82 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats.
+  - Automatic summer seat cooling thresholds for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats.
 - **Passenger & Rear Heated Seat Policies**
   - **Front Passenger Policy** (`Off`, `-1 Step` gentler than driver, or `Match` driver) for both heating and cooling.
   - **Rear Heated Seats Policy** (`Off`, `-1 Step`, or `Match` up to 2 rear levels) for vehicles with rear seat heaters.
 - **Material Design 3 Widescreen Dashboard (`1920×720`)**
-  - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live 4-seat cabin preview tiles, a `-5 °F .. 115 °F` seasonal comfort spectrum bar with live outside temperature pin, one-tap **Apply Now** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.
+  - Adaptive **Day / Night** M3 tonal surfaces (`UiModeManager`), animated stadium switches, segmented controls, live 4-seat cabin preview tiles, a `-5 °F .. 115 °F` seasonal comfort spectrum bar with live outside temperature pin, one-tap **Run Climate Check** test button, **Star (★) Key** binding support, and stock-gradient Gen5W launcher tiles.
   - Zero `/system` file modifications and zero firmware-specific hook points—removing or disabling the mod leaves the head unit 100% stock.
 
 ---
@@ -69,17 +70,17 @@ HMG-API protects vehicle climate and startup commands behind owner switches. Aft
 3. **Seat ventilation** (`seat_vent` for **Comfort & Startup**, if your car has ventilated seats)
 4. **Steering wheel heat** (`wheel_heat` for **Comfort & Startup**, if your car has a heated wheel)
 
-Then open **Comfort** from the head unit's **All Apps** screen (or **NEMESIS Manager → Launch**, or bind **Comfort & Startup** to your steering-wheel/dash **★** button) and tap **Apply Now** to test immediately.
+Then open **Comfort** from the head unit's **All Apps** screen (or **NEMESIS Manager → Launch**, or bind **Comfort & Startup** to your steering-wheel/dash **★** button) and tap **Run Climate Check** to test immediately.
 
 ---
 
 ## Compatibility
 
-Comfort & Startup uses HMG-API's cross-vehicle `vehicle` service (`outside_temp_f`, `hv.ready`, `gear.park`, `seat_heat.*`, `seat_vent.*`, `wheel_heat`, `startup_notice`) and requires **no per-firmware bytecode hooks**.
+Comfort & Startup uses HMG-API's cross-vehicle `vehicle` service (`outside_temp_f`, `hv.ready`, `gear.park`, `charging`, `seat_heat.*`, `seat_vent.*`, `seat_state.*`, `wheel_heat`, `startup_notice`) and requires **no per-firmware bytecode hooks**.
 
 | Vehicle | Firmware Tested | HMG-API |
 |---|---|---|
-| Hyundai Ioniq 5 (`NEEV`, `NEEV23`, `NEEV23SE`, US) | `260507`, `260903` | `1.1.0-rc.3` |
+| Hyundai Ioniq 5 (`NEEV`, `NEEV23`, `NEEV23SE`, US) | `260507`, `260903` | `1.1.0-rc.3+` |
 
 Tried it on another Hyundai, Kia, or Genesis Gen5W vehicle? Open a [Car Compatibility Report](../../issues/new?template=car-report.yml) to add your model to the table!
 

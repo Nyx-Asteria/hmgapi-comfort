@@ -23,6 +23,7 @@ public final class ComfortService extends Service {
     public static final String ACTION_HKMC_QB_WAKEUP = "com.hkmc.intent.action.QB_WAKEUP";
     public static final String ACTION_QB_SLEEP = "com.daudio.app.qb.QB_SLEEP";
     public static final String ACTION_QB_POW_OFF = "com.daudio.app.qb.QB_POW_OFF";
+    public static final String ACTION_ENSURE_RUNNING = "dev.lemoyne.comfort.action.ENSURE_RUNNING";
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private ComfortEngine engine;
@@ -35,11 +36,14 @@ public final class ComfortService extends Service {
                 || ACTION_HKMC_QB_WAKEUP.equals(act);
     }
 
+    private static boolean isPowerOffAction(String act) {
+        return ACTION_QB_SLEEP.equals(act) || ACTION_QB_POW_OFF.equals(act);
+    }
+
     private static boolean isSleepAction(String act) {
         return Intent.ACTION_SCREEN_OFF.equals(act)
                 || ACTION_MOBIS_SCREEN_OFF.equals(act)
-                || ACTION_QB_SLEEP.equals(act)
-                || ACTION_QB_POW_OFF.equals(act);
+                || isPowerOffAction(act);
     }
 
     private final BroadcastReceiver eventReceiver = new BroadcastReceiver() {
@@ -47,7 +51,9 @@ public final class ComfortService extends Service {
         public void onReceive(Context context, Intent intent) {
             if (intent == null || engine == null) return;
             String act = intent.getAction();
-            if (isSleepAction(act)) {
+            if (isPowerOffAction(act)) {
+                engine.onVehiclePowerOff();
+            } else if (isSleepAction(act)) {
                 engine.onScreenOff();
             } else if (isWakeAction(act)) {
                 engine.onScreenOn();
@@ -81,10 +87,14 @@ public final class ComfortService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (engine != null) {
             engine.ensureStarted();
-            if (intent != null && isWakeAction(intent.getAction())) {
+            String act = intent == null ? null : intent.getAction();
+            if (isWakeAction(act)) {
                 engine.onScreenOn();
+            } else if (ACTION_ENSURE_RUNNING.equals(act)) {
+                engine.onSupervisorPing();
+            } else {
+                engine.requestSettingsReload();
             }
-            engine.requestSettingsReload();
         }
         return START_STICKY;
     }
@@ -110,8 +120,8 @@ public final class ComfortService extends Service {
             @Override
             public void run() {
                 try {
-                    HmgApi api = HmgApi.connect().timeout(2000);
-                    if (api.available() && api.mod() == null) {
+                    HmgApi api = HmgApi.connect().timeout(2500);
+                    if (ComfortEngine.isModExplicitlyDisabled(api)) {
                         uiHandler.post(new Runnable() {
                             @Override
                             public void run() {

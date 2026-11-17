@@ -1,6 +1,7 @@
 package dev.lemoyne.comfort;
 
 import android.content.Context;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -21,12 +22,12 @@ import java.util.Map;
 /**
  * Background coordinator for Comfort & Startup:
  * - Event-driven startup notice dismissal on cold boot and QuickBoot wake
- * - Multi-tier cold/warm seat & steering wheel climate on EV Ready
+ * - Multi-tier cold/warm seat & steering wheel climate on EV Ready and plugged-in/Utility cabin sessions
  */
 public final class ComfortEngine {
     private static final String TAG = "HmgComfort";
     private static final String[] READ_KEYS = {
-        "hv.ready", "gear.park", "outside_temp_f", "outside_temp", "wheel_heat",
+        "hv.ready", "gear.park", "charging", "outside_temp_f", "outside_temp", "wheel_heat",
         "seat_heat.driver", "seat_heat.passenger", "seat_heat.rear_left", "seat_heat.rear_right",
         "seat_vent.driver", "seat_vent.passenger",
         "seat_state.driver", "seat_state.passenger", "seat_state.rear_left", "seat_state.rear_right"
@@ -62,6 +63,23 @@ public final class ComfortEngine {
         return instance;
     }
 
+    /**
+     * Returns true ONLY when hmgapid definitively answers code 13 ("not allowed" / mod disabled)
+     * across two checks, preventing transient cold-boot conditions — hmgapid not up yet, socket
+     * timeout, MAX_WORKERS busy (code 75), or brief PackageManager list rewrites — from stopping
+     * or skipping ComfortService.
+     */
+    public static boolean isModExplicitlyDisabled(HmgApi api) {
+        if (api == null) return false;
+        try {
+            if (api.call("whoami").code != 13) return false;
+            sleepQuietly(300);
+            return api.call("whoami").code == 13;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private final Context appContext;
     private final List<Listener> listeners = new ArrayList<Listener>();
     private final ComfortPolicy.DriveTracker driveTracker = new ComfortPolicy.DriveTracker();
@@ -70,15 +88,20 @@ public final class ComfortEngine {
 
     private volatile ComfortConfig config = ComfortConfig.defaults();
     private volatile Map<String, String> lastReadings = new LinkedHashMap<String, String>();
-    private volatile String lastClimateStatus = "Waiting for EV Ready";
+    private volatile String lastClimateStatus = "Waiting for vehicle start";
     private volatile String lastWelcomeStatus = "Armed for startup";
     private volatile boolean connected;
     private volatile boolean running;
     private volatile boolean reloadSettings = true;
     private volatile boolean forceClimateRun;
     private volatile boolean forceWelcomeRun;
+    private volatile boolean mobisAwake = true;
     private Thread worker;
     private int welcomeAttempts;
+    private int outOfParkWelcomeChecks;
+    private int tempTimeoutRetries;
+    private long lastEngineSleepGap = Long.MIN_VALUE;
+    private long lastEngineWakeSeq = Long.MIN_VALUE;
 
     private ComfortEngine(Context appContext) {
         this.appContext = appContext;
@@ -124,14 +147,32 @@ public final class ComfortEngine {
     }
 
     public void onScreenOff() {
+        mobisAwake = false;
         welcomeTracker.onScreenOff();
         welcomeAttempts = 0;
+        outOfParkWelcomeChecks = 0;
         wakeWorker();
     }
 
     public void onScreenOn() {
+        mobisAwake = true;
         welcomeTracker.onScreenOn(SystemClock.elapsedRealtime());
         welcomeAttempts = 0;
+        outOfParkWelcomeChecks = 0;
+        wakeWorker();
+    }
+
+    public void onVehiclePowerOff() {
+        mobisAwake = false;
+        driveTracker.onPowerOff();
+        welcomeTracker.onScreenOff();
+        welcomeAttempts = 0;
+        outOfParkWelcomeChecks = 0;
+        tempTimeoutRetries = 0;
+        wakeWorker();
+    }
+
+    public void onSupervisorPing() {
         wakeWorker();
     }
 
@@ -150,6 +191,19 @@ public final class ComfortEngine {
         wakeWorker();
     }
 
+    private boolean isDisplayOn() {
+        try {
+            PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+            return pm == null || pm.isScreenOn();
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    private boolean isScreenInteractive() {
+        return mobisAwake && isDisplayOn();
+    }
+
     private synchronized void wakeWorker() {
         if (worker != null) worker.interrupt();
     }
@@ -161,33 +215,55 @@ public final class ComfortEngine {
                 long now = SystemClock.elapsedRealtime();
                 long sleepGap = now - SystemClock.uptimeMillis();
                 long wakeSeq = WelcomeDaemon.readWakeSeq();
+                if ((lastEngineSleepGap != Long.MIN_VALUE && sleepGap - lastEngineSleepGap >= 3000L)
+                        || (lastEngineWakeSeq != Long.MIN_VALUE && wakeSeq > lastEngineWakeSeq)) {
+                    mobisAwake = isDisplayOn();
+                    welcomeAttempts = 0;
+                    outOfParkWelcomeChecks = 0;
+                    tempTimeoutRetries = 0;
+                }
+                lastEngineSleepGap = sleepGap;
+                lastEngineWakeSeq = wakeSeq;
+
                 driveTracker.onSuspendCheck(sleepGap);
                 driveTracker.onWakeSeqCheck(wakeSeq);
                 welcomeTracker.onSuspendCheck(sleepGap, now);
                 welcomeTracker.onWakeSeqCheck(wakeSeq, now);
 
-                HmgApi api = HmgApi.connect().timeout(3000);
-                if (!api.available()) {
+                HmgApi api = HmgApi.connect().timeout(5000);
+                HmgApi.Result who;
+                try {
+                    who = api.call("whoami");
+                } catch (IOException e) {
                     connected = false;
                     notifyListeners();
-                    sleepQuietly(1500);
+                    sleepQuietly(1200);
                     continue;
                 }
-                String modId = api.mod();
-                if (modId == null) {
+                String whoText = who.text == null ? "" : who.text.trim();
+                if (who.code == 13) {
                     connected = false;
                     notifyListeners();
                     sleepQuietly(5000);
                     continue;
                 }
+                if (who.code != 0 || "root".equals(whoText) || whoText.isEmpty()) {
+                    // Transient hmgapid MAX_WORKERS busy (code 75): back off briefly without dropping state
+                    sleepQuietly(800);
+                    continue;
+                }
                 connected = true;
 
                 if (reloadSettings) {
-                    reloadSettings = false;
-                    config = parseConfig(api.settings());
+                    try {
+                        config = parseConfig(api.settings());
+                        reloadSettings = false;
+                    } catch (IOException e) {
+                        Log.w(TAG, "[hmgapi-comfort] settings read retry later: " + e);
+                    }
                 }
 
-                // 1. Startup safety notice auto-dismiss BEFORE 14-signal vehicle read so IPC latency never delays it
+                // 1. Startup safety notice auto-dismiss BEFORE 15-signal vehicle read so IPC latency never delays it
                 if (forceWelcomeRun || (config.welcomeDismiss
                         && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs))) {
                     boolean manual = forceWelcomeRun;
@@ -198,15 +274,16 @@ public final class ComfortEngine {
                 Map<String, String> v = api.vehicle(READ_KEYS);
                 lastReadings = v;
 
-                // 2. Cold/Warm auto-climate on EV Ready rising edge (or manual test button)
+                // 2. Cold/Warm auto-climate on EV Ready or plugged-in/Utility cabin session (or manual test button)
                 boolean manualClimate = forceClimateRun;
                 forceClimateRun = false;
-                if (manualClimate || (config.climateEnabled && driveTracker.shouldTrigger(v.get("hv.ready")))) {
+                if (manualClimate || (config.climateEnabled
+                        && driveTracker.shouldTrigger(v, isScreenInteractive()))) {
                     runClimateSequence(api, manualClimate);
                 }
 
                 notifyListeners();
-                sleepQuietly(config.welcomeDismiss && welcomeTracker.isPending() ? 250 : 2500);
+                sleepQuietly(config.welcomeDismiss && welcomeTracker.isPending() ? 400 : 2500);
             } catch (Throwable t) {
                 Log.w(TAG, "[hmgapi-comfort] loop error: " + t);
                 sleepQuietly(1500);
@@ -220,6 +297,7 @@ public final class ComfortEngine {
             String res = api.command("startup_notice", "dismiss");
             welcomeTracker.markDone();
             welcomeAttempts = 0;
+            outOfParkWelcomeChecks = 0;
             lastWelcomeStatus = stamp("Dismissed (" + res + ")");
             Log.i(TAG, "[hmgapi-comfort] startup_notice dismiss -> " + res);
         } catch (HmgApi.HmgApiException e) {
@@ -227,23 +305,48 @@ public final class ComfortEngine {
             if (msg.contains("once per start")) {
                 welcomeTracker.markDone();
                 welcomeAttempts = 0;
+                outOfParkWelcomeChecks = 0;
                 lastWelcomeStatus = stamp("Dismissed on start (fast-path)");
                 Log.i(TAG, "[hmgapi-comfort] startup_notice -> already dismissed by WelcomeDaemon");
-            } else if (msg.contains("not in P") && !manual) {
-                welcomeTracker.markDone();
-                welcomeAttempts = 0;
-                lastWelcomeStatus = stamp("Skipped (shifted out of Park)");
-                Log.i(TAG, "[hmgapi-comfort] startup_notice -> " + msg);
+            } else if ((msg.contains("isn't in P") || msg.contains("not in P")) && !manual) {
+                Map<String, String> pCheck = lastReadings;
+                try {
+                    pCheck = api.vehicle("gear.park", "hv.ready");
+                } catch (Throwable ignored) {}
+                if (ComfortPolicy.isConfirmedOutOfPark(pCheck)) {
+                    outOfParkWelcomeChecks++;
+                    if (outOfParkWelcomeChecks >= 3) {
+                        welcomeTracker.markDone();
+                        welcomeAttempts = 0;
+                        outOfParkWelcomeChecks = 0;
+                        lastWelcomeStatus = stamp("Skipped (shifted out of Park)");
+                        Log.i(TAG, "[hmgapi-comfort] startup_notice -> " + msg);
+                        return;
+                    }
+                } else {
+                    outOfParkWelcomeChecks = 0;
+                }
+                welcomeAttempts++;
+                if (welcomeAttempts >= 40) {
+                    welcomeTracker.markDone();
+                    welcomeAttempts = 0;
+                    outOfParkWelcomeChecks = 0;
+                    lastWelcomeStatus = stamp("Gave up waiting for Park: " + msg);
+                } else {
+                    lastWelcomeStatus = stamp("Waiting for Park signal (" + welcomeAttempts + ")...");
+                }
             } else if (msg.contains("hasn't allowed") || msg.contains("didn't allow")) {
                 welcomeTracker.markDone();
                 welcomeAttempts = 0;
+                outOfParkWelcomeChecks = 0;
                 lastWelcomeStatus = stamp(msg);
                 Log.i(TAG, "[hmgapi-comfort] startup_notice -> " + msg);
             } else {
                 welcomeAttempts++;
-                if (welcomeAttempts >= 12) {
+                if (welcomeAttempts >= 40) {
                     welcomeTracker.markDone();
                     welcomeAttempts = 0;
+                    outOfParkWelcomeChecks = 0;
                     lastWelcomeStatus = stamp("Gave up: " + msg);
                 } else {
                     lastWelcomeStatus = stamp("Retrying (" + welcomeAttempts + "): " + msg);
@@ -251,9 +354,10 @@ public final class ComfortEngine {
             }
         } catch (IOException e) {
             welcomeAttempts++;
-            if (welcomeAttempts >= 8) {
+            if (welcomeAttempts >= 20) {
                 welcomeTracker.markDone();
                 welcomeAttempts = 0;
+                outOfParkWelcomeChecks = 0;
             }
             lastWelcomeStatus = stamp("Error: " + e.getMessage());
         }
@@ -261,33 +365,77 @@ public final class ComfortEngine {
 
     private void runClimateSequence(HmgApi api, boolean manual) throws IOException {
         if (!manual) {
-            sleepQuietly(2000);   // let BCM/USM/VR settle after EV Ready transition
+            if (config.welcomeDismiss
+                    && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs)) {
+                handleWelcome(api, false);
+            }
+            sleepQuietly(1500);   // let BCM/USM/VR settle after EV Ready / cabin power transition
         }
-        // Wait up to 30 s for valid post-wake outside_temp_f
+        // Wait up to 60 s for valid post-wake outside_temp_f and BCM seat climate readiness
         Map<String, String> v = null;
         float tempF = Float.NaN;
-        long deadline = SystemClock.elapsedRealtime() + 30000L;
+        long tempValidSince = 0L;
+        int powerLostTicks = 0;
+        long deadline = SystemClock.elapsedRealtime() + 60000L;
         while (running && SystemClock.elapsedRealtime() < deadline) {
-            v = api.vehicle(READ_KEYS);
-            lastReadings = v;
-            if (!manual && !"1".equals(v.get("hv.ready"))) {
-                lastClimateStatus = stamp("Aborted (EV Ready turned off)");
-                return;
+            if (config.welcomeDismiss
+                    && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs)) {
+                handleWelcome(api, false);
+            }
+            try {
+                v = api.vehicle(READ_KEYS);
+                lastReadings = v;
+            } catch (IOException e) {
+                Log.w(TAG, "[hmgapi-comfort] vehicle read retry during climate wait: " + e);
+                sleepQuietly(1200);
+                continue;
+            }
+            if (!manual) {
+                if ("0".equals(v.get("hv.ready")) && !ComfortPolicy.isBcmSeatClimateReady(v)) {
+                    powerLostTicks++;
+                    if (powerLostTicks >= 2) {
+                        lastClimateStatus = stamp("Aborted (vehicle turned off)");
+                        return;
+                    }
+                } else {
+                    powerLostTicks = 0;
+                }
             }
             tempF = ComfortPolicy.parseAmbientF(v.get("outside_temp_f"));
-            if (!Float.isNaN(tempF)) break;
+            if (!Float.isNaN(tempF)) {
+                if (tempValidSince == 0L) {
+                    tempValidSince = SystemClock.elapsedRealtime();
+                }
+                if (manual
+                        || ComfortPolicy.isBcmSeatClimateReady(v)
+                        || SystemClock.elapsedRealtime() - tempValidSince >= 10000L) {
+                    break;
+                }
+                lastClimateStatus = stamp("Waiting for seat climate controller...");
+                notifyListeners();
+                sleepQuietly(1000);
+                continue;
+            }
             lastClimateStatus = stamp("Waiting for valid outside temperature...");
             notifyListeners();
             sleepQuietly(1500);
         }
 
         if (Float.isNaN(tempF) || v == null) {
+            if (!manual && tempTimeoutRetries < 2) {
+                tempTimeoutRetries++;
+                lastClimateStatus = stamp("Outside temperature delayed (retry " + tempTimeoutRetries + "/2)...");
+                Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable after 60 s; will retry ("
+                        + tempTimeoutRetries + "/2)");
+                return;
+            }
             driveTracker.markCompleted();
             lastClimateStatus = stamp("Skipped (outside temperature unavailable)");
-            Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable after 30 s; skipping climate");
+            Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable; skipping climate for this session");
             return;
         }
 
+        tempTimeoutRetries = 0;
         ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v);
         if (plan.actions.isEmpty()) {
             driveTracker.markCompleted();
@@ -307,54 +455,89 @@ public final class ComfortEngine {
 
     private boolean executeActionsWithRetry(HmgApi api, List<ComfortPolicy.Action> actions) throws IOException {
         List<ComfortPolicy.Action> pending = new ArrayList<ComfortPolicy.Action>(actions);
-        for (int attempt = 0; attempt < 3 && !pending.isEmpty() && running; attempt++) {
+        boolean hadPermanentRefusal = false;
+        int ownerWaits = 0;
+        for (int attempt = 0; attempt < 6 && !pending.isEmpty() && running; ) {
+            if (config.welcomeDismiss
+                    && welcomeTracker.readyToDismiss(SystemClock.elapsedRealtime(), config.welcomeDelayMs)) {
+                handleWelcome(api, false);
+            }
             boolean waitingOwner = false;
-            List<ComfortPolicy.Action> sent = new ArrayList<ComfortPolicy.Action>();
+            List<ComfortPolicy.Action> candidates = new ArrayList<ComfortPolicy.Action>();
             for (ComfortPolicy.Action act : pending) {
                 ComfortPolicy.Action actual = act;
                 try {
                     api.command(act.command, act.args());
-                    sent.add(actual);
+                    candidates.add(actual);
                 } catch (HmgApi.HmgApiException e) {
                     String msg = e.getMessage() == null ? "" : e.getMessage();
                     if (msg.contains("two levels") && "medium".equals(act.level)) {
-                        actual = new ComfortPolicy.Action(act.command, act.target, ComfortPolicy.fallbackTwoStep(act.level));
+                        actual = new ComfortPolicy.Action(
+                                act.command, act.target, ComfortPolicy.fallbackTwoStep(act.level));
                         try {
                             api.command(actual.command, actual.args());
-                            sent.add(actual);
+                            candidates.add(actual);
+                        } catch (HmgApi.HmgApiException e2) {
+                            String msg2 = e2.getMessage() == null ? "" : e2.getMessage();
+                            if (ComfortPolicy.isPermanentCommandRefusal(msg2)) {
+                                hadPermanentRefusal = true;
+                            } else {
+                                candidates.add(actual);
+                            }
+                            Log.w(TAG, "[hmgapi-comfort] two-step fallback (" + actual + "): " + msg2);
                         } catch (IOException e2) {
-                            Log.w(TAG, "[hmgapi-comfort] two-step fallback failed: " + e2);
+                            candidates.add(actual);
+                            Log.w(TAG, "[hmgapi-comfort] two-step fallback I/O (" + actual + "): " + e2);
                         }
                     } else if (msg.contains("waiting for the owner")) {
                         waitingOwner = true;
-                        sent.add(actual);
+                        candidates.add(actual);
+                    } else if (ComfortPolicy.isPermanentCommandRefusal(msg)) {
+                        hadPermanentRefusal = true;
+                        Log.w(TAG, "[hmgapi-comfort] permanent command refusal (" + act + "): " + msg);
                     } else {
-                        Log.w(TAG, "[hmgapi-comfort] command refused (" + act + "): " + msg);
+                        candidates.add(actual);
+                        Log.w(TAG, "[hmgapi-comfort] transient command failure (" + act + ", attempt "
+                                + (attempt + 1) + "): " + msg);
                     }
+                } catch (IOException e) {
+                    candidates.add(actual);
+                    Log.w(TAG, "[hmgapi-comfort] command I/O error (" + act + ", attempt "
+                            + (attempt + 1) + "): " + e);
                 }
-                sleepQuietly(220);
+                sleepQuietly(250);
             }
-            if (waitingOwner) {
+
+            if (candidates.isEmpty()) {
+                return false;
+            }
+
+            if (waitingOwner && ownerWaits < 6) {
+                ownerWaits++;
                 lastClimateStatus = stamp("Waiting for owner command approval on screen...");
                 notifyListeners();
                 sleepQuietly(5000);
             } else {
-                sleepQuietly(1500);
+                attempt++;
+                sleepQuietly(2000);   // > Hub's 1000 ms cache window so fresh BCM/VR telemetry is verified
             }
-            Map<String, String> check = api.vehicle(READ_KEYS);
-            lastReadings = check;
-            List<ComfortPolicy.Action> retry = new ArrayList<ComfortPolicy.Action>();
-            for (ComfortPolicy.Action act : sent) {
-                if ("wheel_heat".equals(act.command)) {
-                    if ("0".equals(check.get("wheel_heat"))) retry.add(act);
-                } else {
-                    String st = check.get("seat_state." + act.target);
-                    if ("2".equals(st)) retry.add(act);
+
+            try {
+                Map<String, String> check = api.vehicle(READ_KEYS);
+                lastReadings = check;
+                List<ComfortPolicy.Action> retry = new ArrayList<ComfortPolicy.Action>();
+                for (ComfortPolicy.Action act : candidates) {
+                    if (!ComfortPolicy.isActionConfirmed(act, check)) {
+                        retry.add(act);
+                    }
                 }
+                pending = retry;
+            } catch (IOException e) {
+                Log.w(TAG, "[hmgapi-comfort] verification read failed: " + e);
+                pending = candidates;
             }
-            pending = retry;
         }
-        return pending.isEmpty();
+        return pending.isEmpty() && !hadPermanentRefusal;
     }
 
     public static ComfortConfig parseConfig(JSONObject j) {
