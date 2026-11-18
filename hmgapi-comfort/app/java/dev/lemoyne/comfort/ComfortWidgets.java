@@ -420,6 +420,9 @@ final class ComfortWidgets {
         private static final float MIN_F = -5f;
         private static final float MAX_F_WITH_VENT = 115f;
         private static final float MAX_F_HEAT_ONLY = 100f;
+        private static final float MIN_C = -20f;
+        private static final float MAX_C_WITH_VENT = 46f;
+        private static final float MAX_C_HEAT_ONLY = 38f;
 
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -429,7 +432,9 @@ final class ComfortWidgets {
         private final float sp;
         private ComfortConfig cfg = ComfortConfig.defaults();
         private float ambientF = Float.NaN;
+        private float ambientC = Float.NaN;
         private boolean ventSupported = true;
+        private boolean metric;
 
         SpectrumBarView(Context c) {
             super(c);
@@ -440,13 +445,24 @@ final class ComfortWidgets {
         }
 
         void update(ComfortConfig nextCfg, float nextAmbientF) {
-            update(nextCfg, nextAmbientF, true);
+            update(nextCfg, nextAmbientF, Float.NaN, true, false);
         }
 
         void update(ComfortConfig nextCfg, float nextAmbientF, boolean nextVentSupported) {
+            update(nextCfg, nextAmbientF, Float.NaN, nextVentSupported, false);
+        }
+
+        void update(
+                ComfortConfig nextCfg,
+                float nextAmbientF,
+                float nextAmbientC,
+                boolean nextVentSupported,
+                boolean nextMetric) {
             this.cfg = nextCfg;
             this.ambientF = nextAmbientF;
+            this.ambientC = nextAmbientC;
             this.ventSupported = nextVentSupported;
+            this.metric = nextMetric;
             invalidate();
         }
 
@@ -456,9 +472,9 @@ final class ComfortWidgets {
             setMeasuredDimension(w, Math.round(54 * d));
         }
 
-        private float xFor(float tempF, float left, float width, float maxF) {
-            float clamped = Math.max(MIN_F, Math.min(maxF, tempF));
-            return left + ((clamped - MIN_F) / (maxF - MIN_F)) * width;
+        private static float xFor(float temp, float left, float width, float minT, float maxT) {
+            float clamped = Math.max(minT, Math.min(maxT, temp));
+            return left + ((clamped - minT) / (maxT - minT)) * width;
         }
 
         @Override
@@ -470,14 +486,24 @@ final class ComfortWidgets {
             float barTop = 20f * d;
             float barBot = 34f * d;
             float barR = (barBot - barTop) * 0.5f;
-            float maxF = ventSupported ? MAX_F_WITH_VENT : MAX_F_HEAT_ONLY;
+            float minT = metric ? MIN_C : MIN_F;
+            float maxT = metric
+                    ? (ventSupported ? MAX_C_WITH_VENT : MAX_C_HEAT_ONLY)
+                    : (ventSupported ? MAX_F_WITH_VENT : MAX_F_HEAT_ONLY);
 
-            float xHH = xFor(cfg.heatHighF, left, width, maxF);
-            float xHM = xFor(cfg.heatMedF, left, width, maxF);
-            float xHL = xFor(cfg.heatLowF, left, width, maxF);
-            float xVL = xFor(cfg.ventLowF, left, width, maxF);
-            float xVM = xFor(cfg.ventMedF, left, width, maxF);
-            float xVH = xFor(cfg.ventHighF, left, width, maxF);
+            int hh = metric ? cfg.heatHighC : cfg.heatHighF;
+            int hm = metric ? cfg.heatMedC : cfg.heatMedF;
+            int hl = metric ? cfg.heatLowC : cfg.heatLowF;
+            int vl = metric ? cfg.ventLowC : cfg.ventLowF;
+            int vm = metric ? cfg.ventMedC : cfg.ventMedF;
+            int vh = metric ? cfg.ventHighC : cfg.ventHighF;
+
+            float xHH = xFor(hh, left, width, minT, maxT);
+            float xHM = xFor(hm, left, width, minT, maxT);
+            float xHL = xFor(hl, left, width, minT, maxT);
+            float xVL = xFor(vl, left, width, minT, maxT);
+            float xVM = xFor(vm, left, width, minT, maxT);
+            float xVH = xFor(vh, left, width, minT, maxT);
 
             // Clip to full stadium pill for crisp outer corners
             c.save();
@@ -515,8 +541,8 @@ final class ComfortWidgets {
                     ? new float[] { xHH, xHM, xHL, xVL, xVM, xVH }
                     : new float[] { xHH, xHM, xHL };
             int[] vals = ventSupported
-                    ? new int[] { cfg.heatHighF, cfg.heatMedF, cfg.heatLowF, cfg.ventLowF, cfg.ventMedF, cfg.ventHighF }
-                    : new int[] { cfg.heatHighF, cfg.heatMedF, cfg.heatLowF };
+                    ? new int[] { hh, hm, hl, vl, vm, vh }
+                    : new int[] { hh, hm, hl };
             float lastDrawnX = -999f;
             float minGap = 28f * d;
             for (int i = 0; i < xs.length; i++) {
@@ -529,10 +555,13 @@ final class ComfortWidgets {
                 }
             }
 
-            // Live outside_temp_f marker above bar
-            if (!Float.isNaN(ambientF)) {
-                float mx = xFor(ambientF, left, width, maxF);
-                String tag = Math.round(ambientF) + "°F Now";
+            // Live outside temperature marker above bar
+            float liveVal = metric ? ambientC : ambientF;
+            if (!Float.isNaN(liveVal)) {
+                float mx = xFor(liveVal, left, width, minT, maxT);
+                String tag = metric
+                        ? (ComfortPolicy.formatTenths(ambientC) + "°C Now")
+                        : (Math.round(ambientF) + "°F Now");
                 textPaint.setTextSize(11.5f * sp);
                 float tw = textPaint.measureText(tag) + 12f * d;
                 float pillLeft = Math.max(left, Math.min(right - tw, mx - tw * 0.5f));

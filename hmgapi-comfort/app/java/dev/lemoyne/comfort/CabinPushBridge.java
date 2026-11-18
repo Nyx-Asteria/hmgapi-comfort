@@ -38,6 +38,7 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
     private volatile int outsideC10 = Integer.MIN_VALUE;
     private volatile int wheelHeat = Integer.MIN_VALUE;
     private volatile boolean datcSentinel;
+    private volatile int datcTempUnit = OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
 
     private boolean reflectionResolved;
     private Method getServiceMethod;
@@ -48,11 +49,13 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
     private Method datcListenerAsInterface;
     private Method datcRegisterMethod;
     private Method datcUnregisterMethod;
+    private Method datcGetTempUnit;
     private String datcListenerDescriptor;
     private int txOnDatcStatus = -1;
     private Parcelable.Creator<?> datcStatusCreator;
     private Method getAmbientTempF;
     private Method getAmbientTempC;
+    private Method getAmbientTempStateF;
     private Method getAmbientTempStateC;
 
     private Method bcmStubAsInterface;
@@ -81,8 +84,13 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
         outsideC10 = Integer.MIN_VALUE;
         wheelHeat = Integer.MIN_VALUE;
         datcSentinel = false;
+        datcTempUnit = OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
         lastDatcAskMs = 0L;
         lastBcmAskMs = 0L;
+    }
+
+    private boolean hasDatcReading() {
+        return outsideF10 != Integer.MIN_VALUE || outsideC10 != Integer.MIN_VALUE;
     }
 
     @Override
@@ -91,7 +99,7 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
         boolean waitBcm = false;
         synchronized (this) {
             resolveReflectionLocked();
-            if (!prevIgnOn && ignOn && outsideF10 == Integer.MIN_VALUE) {
+            if (!prevIgnOn && ignOn && !hasDatcReading()) {
                 // Ignition (IG1/IG2) just came ON: immediately rotate a fresh listener
                 lastDatcAskMs = 0L;
                 lastBcmAskMs = 0L;
@@ -106,7 +114,7 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
                 datcProxy = null;
             }
             if (datcBinder == null
-                    || (outsideF10 == Integer.MIN_VALUE && now - lastDatcAskMs >= datcRetryMs)) {
+                    || (!hasDatcReading() && now - lastDatcAskMs >= datcRetryMs)) {
                 waitDatc = registerFreshDatcLocked(now);
             }
 
@@ -125,7 +133,7 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
         // Wait briefly outside the monitor so asynchronous Binder callbacks can deliver initial state
         if (waitDatc || waitBcm) {
             for (int i = 0; i < 6; i++) {
-                boolean doneDatc = !waitDatc || outsideF10 != Integer.MIN_VALUE || datcSentinel;
+                boolean doneDatc = !waitDatc || hasDatcReading() || datcSentinel;
                 boolean doneBcm = !waitBcm || wheelHeat != Integer.MIN_VALUE;
                 if (doneDatc && doneBcm) {
                     break;
@@ -143,16 +151,27 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
     @Override
     public String outsideTempF() {
         int f10 = outsideF10;
-        return f10 == Integer.MIN_VALUE ? "-" : formatTenths(f10 / 10f);
+        if (f10 != Integer.MIN_VALUE) {
+            return formatTenths(f10 / 10f);
+        }
+        int c10 = outsideC10;
+        if (c10 != Integer.MIN_VALUE) {
+            return formatTenths(ComfortPolicy.celsiusToFahrenheit(c10 / 10f));
+        }
+        return "-";
     }
 
     @Override
     public String outsideTempC() {
-        int f10 = outsideF10;
-        if (f10 == Integer.MIN_VALUE) return "-";
         int c10 = outsideC10;
-        float c = c10 != Integer.MIN_VALUE ? (c10 / 10f) : ((f10 / 10f - 32f) * 5f / 9f);
-        return formatTenths(c);
+        if (c10 != Integer.MIN_VALUE) {
+            return formatTenths(c10 / 10f);
+        }
+        int f10 = outsideF10;
+        if (f10 != Integer.MIN_VALUE) {
+            return formatTenths(ComfortPolicy.fahrenheitToCelsius(f10 / 10f));
+        }
+        return "-";
     }
 
     @Override
@@ -163,7 +182,12 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
 
     @Override
     public boolean isDatcSentinel() {
-        return datcSentinel && outsideF10 == Integer.MIN_VALUE;
+        return datcSentinel && !hasDatcReading();
+    }
+
+    @Override
+    public int tempUnit() {
+        return datcTempUnit;
     }
 
     private void resolveReflectionLocked() {
@@ -194,6 +218,7 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
             datcListenerAsInterface = listenerStub.getMethod("asInterface", IBinder.class);
             datcRegisterMethod = datcIface.getMethod("registerDATCListener", listenerIface, IBinder.class);
             datcUnregisterMethod = findUnregisterMethod(datcIface, "unregisterDATCListener", listenerIface);
+            datcGetTempUnit = findOptionalNoArgMethod(datcIface, "getTemperatureUnit");
             datcListenerDescriptor = listenerIface.getName();
 
             Field txField = listenerStub.getDeclaredField("TRANSACTION_onDatcStatus");
@@ -204,9 +229,13 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
             creatorField.setAccessible(true);
             datcStatusCreator = (Parcelable.Creator<?>) creatorField.get(null);
 
-            getAmbientTempF = findNoArgMethod(statusCls, "getAmbientTempF");
-            getAmbientTempC = findNoArgMethod(statusCls, "getAmbientTempC");
-            getAmbientTempStateC = findNoArgMethod(statusCls, "getAmbientTempStateC");
+            getAmbientTempF = findOptionalNoArgMethod(statusCls, "getAmbientTempF");
+            getAmbientTempC = findOptionalNoArgMethod(statusCls, "getAmbientTempC");
+            getAmbientTempStateF = findOptionalNoArgMethod(statusCls, "getAmbientTempStateF");
+            getAmbientTempStateC = findOptionalNoArgMethod(statusCls, "getAmbientTempStateC");
+            if (getAmbientTempF == null && getAmbientTempC == null) {
+                throw new NoSuchMethodException("DatcStatus missing getAmbientTempF/C");
+            }
         } catch (Throwable t) {
             Log.w(TAG, "[hmgapi-comfort] DATC push bridge unavailable: " + t);
             txOnDatcStatus = -1;
@@ -233,6 +262,19 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
         }
     }
 
+    private int queryDatcTempUnit() {
+        Object svc = datcSvc;
+        Method m = datcGetTempUnit;
+        if (svc == null || m == null) return 0;
+        try {
+            Object v = m.invoke(svc);
+            if (v instanceof Number) {
+                return ((Number) v).intValue();
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
     private boolean registerFreshDatcLocked(long now) {
         if (getServiceMethod == null || datcStubAsInterface == null || datcListenerAsInterface == null
                 || datcRegisterMethod == null || datcStatusCreator == null || txOnDatcStatus < 0) {
@@ -253,18 +295,59 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
                     if (d.readInt() == 0) return;
                     Object st = datcStatusCreator.createFromParcel(d);
                     if (st == null) return;
-                    float f = ((Number) getAmbientTempF.invoke(st)).floatValue();
-                    float c = ((Number) getAmbientTempC.invoke(st)).floatValue();
-                    int stateC = ((Number) getAmbientTempStateC.invoke(st)).intValue();
-                    if (!ComfortPolicy.validAmbientF(f)) {
+                    float f = getAmbientTempF != null
+                            ? ((Number) getAmbientTempF.invoke(st)).floatValue()
+                            : Float.NaN;
+                    float c = getAmbientTempC != null
+                            ? ((Number) getAmbientTempC.invoke(st)).floatValue()
+                            : Float.NaN;
+                    int stateF = getAmbientTempStateF != null
+                            ? ((Number) getAmbientTempStateF.invoke(st)).intValue()
+                            : 0;
+                    int stateC = getAmbientTempStateC != null
+                            ? ((Number) getAmbientTempStateC.invoke(st)).intValue()
+                            : 0;
+                    boolean validF = (stateF != 255) && ComfortPolicy.validAmbientF(f);
+                    boolean validC = (stateC != 255) && ComfortPolicy.validAmbientC(c);
+                    if (!validF && !validC) {
                         datcSentinel = true;
                         outsideF10 = Integer.MIN_VALUE;
                         outsideC10 = Integer.MIN_VALUE;
                         return;
                     }
                     datcSentinel = false;
-                    outsideF10 = Math.round(f * 10f);
-                    outsideC10 = (stateC == 255) ? Integer.MIN_VALUE : Math.round(c * 10f);
+                    if (validC && !validF) {
+                        outsideC10 = Math.round(c * 10f);
+                        outsideF10 = Math.round(ComfortPolicy.celsiusToFahrenheit(c) * 10f);
+                        datcTempUnit = OccupantSignalProbe.TEMP_UNIT_C;
+                    } else if (validF && !validC) {
+                        outsideF10 = Math.round(f * 10f);
+                        outsideC10 = Math.round(ComfortPolicy.fahrenheitToCelsius(f) * 10f);
+                        datcTempUnit = OccupantSignalProbe.TEMP_UNIT_F;
+                    } else {
+                        int svcUnit = queryDatcTempUnit();
+                        if (Math.abs(f - ComfortPolicy.celsiusToFahrenheit(c)) > 3.0f) {
+                            if (svcUnit == 1 || (f == 0.0f && Math.abs(c + 17.8f) > 2.0f)) {
+                                outsideC10 = Math.round(c * 10f);
+                                outsideF10 = Math.round(ComfortPolicy.celsiusToFahrenheit(c) * 10f);
+                                datcTempUnit = OccupantSignalProbe.TEMP_UNIT_C;
+                                return;
+                            }
+                            if (svcUnit == 2 || (c == 0.0f && Math.abs(f - 32.0f) > 3.0f)) {
+                                outsideF10 = Math.round(f * 10f);
+                                outsideC10 = Math.round(ComfortPolicy.fahrenheitToCelsius(f) * 10f);
+                                datcTempUnit = OccupantSignalProbe.TEMP_UNIT_F;
+                                return;
+                            }
+                        }
+                        outsideF10 = Math.round(f * 10f);
+                        outsideC10 = Math.round(c * 10f);
+                        if (svcUnit == 1) {
+                            datcTempUnit = OccupantSignalProbe.TEMP_UNIT_C;
+                        } else if (svcUnit == 2) {
+                            datcTempUnit = OccupantSignalProbe.TEMP_UNIT_F;
+                        }
+                    }
                 }
             };
             Object proxy = datcListenerAsInterface.invoke(null, binder);
@@ -334,15 +417,19 @@ final class CabinPushBridge implements OccupantSignalProbe.PushTelemetrySource {
         bcmProxy = null;
     }
 
-    private static Method findNoArgMethod(Class<?> cls, String name) throws NoSuchMethodException {
+    private static Method findOptionalNoArgMethod(Class<?> cls, String name) {
         try {
             Method m = cls.getMethod(name);
             m.setAccessible(true);
             return m;
-        } catch (NoSuchMethodException ignored) {
-            Method m = cls.getDeclaredMethod(name);
-            m.setAccessible(true);
-            return m;
+        } catch (Throwable ignored) {
+            try {
+                Method m = cls.getDeclaredMethod(name);
+                m.setAccessible(true);
+                return m;
+            } catch (Throwable ignored2) {
+                return null;
+            }
         }
     }
 

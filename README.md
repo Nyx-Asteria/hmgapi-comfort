@@ -14,11 +14,11 @@ Automatically dismisses the infotainment startup confirmation screen across cold
   - Lightweight boot-stage daemon (`start: "boot"`) that dismisses the infotainment consent notice within milliseconds of `sys.boot_completed=1` on cold boot and within `150 ms` on QuickBoot suspend-to-RAM resume—only while safely in Park (`P`).
   - Configurable **Dismiss Delay (`0–2500 ms`)** if you prefer a brief pause after wake.
 - **3-Tier Cold-Weather Seat & Steering Wheel Warming**
-  - Independent outside-temperature thresholds (`1 °F` increments) for **Level 3 (High)**, **Level 2 (Medium)**, and **Level 1 (Low)** seat heat (defaults: `≤ 25 °F` → L3, `≤ 38 °F` → L2, `≤ 50 °F` → L1), plus an independent **Steering Wheel Heat** threshold (`≤ 45 °F`).
+  - Automatic **Metric (`°C`) & Imperial (`°F`) Vehicle Unit Support**: detects your car's active temperature unit setting (`°C` or `°F`) automatically, displays live outside temperature and seasonal spectrum ranges in your preferred unit, and steps thresholds in whole `1 °C` or `1 °F` increments (defaults: `≤ -4 °C` / `25 °F` → L3, `≤ 3 °C` / `38 °F` → L2, `≤ 10 °C` / `50 °F` → L1, plus independent **Steering Wheel Heat** at `≤ 7 °C` / `45 °F`).
   - Activates both on **EV Ready** drive starts and during **plugged-in / charging / Utility Mode** cabin sessions when you enter **Ignition ON** (`Start` without brake while tethered, shown as `Charge · ON`)—while distinguishing unpowered **ACC** standby (`Charge · ACC`) and staying completely silent during unoccupied overnight charging or dark-screen remote Bluelink wakes.
-  - Includes a standalone UID-1000 `DATC` / `BCM` Binder push bridge so live outside temperature and steering wheel heat recover immediately on QuickBoot wakes while plugged in and charging, ignores raw `-40 °F` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR, and **never overrides** active Bluelink or manual seat/wheel settings.
+  - Includes a standalone UID-1000 `DATC` / `BCM` Binder push bridge so live outside temperature (`°C` and `°F`) and steering wheel heat recover immediately on QuickBoot wakes while plugged in and charging, ignores raw `-40` pre-CAN wake sentinels, verifies seat/wheel state closed-loop against BCM/VR, and **never overrides** active Bluelink or manual seat/wheel settings.
 - **3-Tier Warm-Weather Front Seat Ventilation**
-  - Automatic summer seat cooling thresholds (`1 °F` increments) for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 95 °F` → L3, `≥ 85 °F` → L2, `≥ 75 °F` → L1) on vehicles equipped with ventilated seats—automatically hidden on trims without ventilated seats.
+  - Automatic summer seat cooling thresholds (`1 °C` or `1 °F` increments) for **Level 3**, **Level 2**, and **Level 1** front ventilation (defaults: `≥ 35 °C` / `95 °F` → L3, `≥ 29 °C` / `85 °F` → L2, `≥ 24 °C` / `75 °F` → L1) on vehicles equipped with ventilated seats—automatically hidden on trims without ventilated seats.
 - **Automatic Front-Passenger Occupancy Detection, Trim-Aware Hardware Detection & Rear Seat Policies**
   - **Automatic Trim Capability Detection**: reads live Gen5W `BCM` / `USM` seat option codes (`*SeatHeatOption`) and silently hides ventilated front-seat or heated rear-seat tiles, toggles, policies, and summer threshold cards when not equipped on the vehicle.
   - **Front Passenger Policy** (`Off`, `-1 Step` gentler than driver, or `Match` driver) for both heating and cooling.
@@ -78,7 +78,7 @@ Then open **Comfort** from the head unit's **All Apps** screen (or **NEMESIS Man
 
 ## Compatibility
 
-Comfort & Startup uses HMG-API's cross-vehicle `vehicle` service (`outside_temp_f`, `hv.ready`, `gear.park`, `charging`, `seat_heat.*`, `seat_vent.*`, `seat_state.*`, `wheel_heat`, `startup_notice`) and requires **no per-firmware bytecode hooks**.
+Comfort & Startup uses HMG-API's cross-vehicle `vehicle` service (`outside_temp`, `outside_temp_f`, `hv.ready`, `gear.park`, `charging`, `seat_heat.*`, `seat_vent.*`, `seat_state.*`, `wheel_heat`, `startup_notice`) and requires **no per-firmware bytecode hooks**.
 
 | Vehicle | Firmware Tested | HMG-API |
 |---|---|---|

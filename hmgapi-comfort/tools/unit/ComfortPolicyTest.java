@@ -536,6 +536,149 @@ public final class ComfortPolicyTest {
         check("lowering ventLowF into 5 F comfort buffer cascades heatLowF down by 1 F",
                 "69/74", gapDown.heatLowF + "/" + gapDown.ventLowF);
 
+        // 23. Metric (C) temperature reading, vehicle unit detection, steppers & direct C evaluation
+        check("validAmbientC rejects -40.0 C pre-CAN wake sentinel",
+                false, ComfortPolicy.validAmbientC(-40.0f));
+        check("validAmbientC rejects 87.5 / 123.9 / 255 CAN sentinels",
+                false, ComfortPolicy.validAmbientC(87.5f)
+                        || ComfortPolicy.validAmbientC(123.9f)
+                        || ComfortPolicy.validAmbientC(255.0f));
+        check("validAmbientC accepts 0.0 C, -18.5 C, and 24.5 C",
+                true, ComfortPolicy.validAmbientC(0.0f)
+                        && ComfortPolicy.validAmbientC(-18.5f)
+                        && ComfortPolicy.validAmbientC(24.5f));
+        check("parseAmbientC rejects '-' and '-40' and parses '4.5'",
+                "true/true/4.5",
+                Float.isNaN(ComfortPolicy.parseAmbientC("-")) + "/"
+                        + Float.isNaN(ComfortPolicy.parseAmbientC("-40")) + "/"
+                        + ComfortPolicy.formatTenths(ComfortPolicy.parseAmbientC("4.5")));
+
+        // Metric car where HMG-API outside_temp_f holds sentinel 255 while outside_temp is valid 4.0 C
+        Map<String, String> metricHubOnly = ComfortPolicy.mergeCabinFallback(
+                state("outside_temp_f", "255", "outside_temp", "4.0", "wheel_heat", "0"),
+                OccupantSignalProbe.CabinState.UNAVAILABLE);
+        check("mergeCabinFallback converts valid outside_temp (4.0 C) when outside_temp_f is 255",
+                "39.2/4.0",
+                metricHubOnly.get("outside_temp_f") + "/" + metricHubOnly.get("outside_temp"));
+
+        // Metric car on unpatched HMG-API where both hub keys are stuck at '-' and CabinPushBridge provides C+F
+        OccupantSignalProbe.CabinState metricPushCabin = new OccupantSignalProbe.CabinState(
+                soloEmpty, "39.2", "4.0", "0", 1, 1, 1, 0, false,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                OccupantSignalProbe.TEMP_UNIT_C);
+        Map<String, String> metricBridgeFallback = ComfortPolicy.mergeCabinFallback(
+                state("outside_temp_f", "-", "outside_temp", "-", "wheel_heat", "-"),
+                metricPushCabin);
+        check("mergeCabinFallback populates both C and F from CabinPushBridge when hub is '-'",
+                "39.2/4.0/0",
+                metricBridgeFallback.get("outside_temp_f") + "/"
+                        + metricBridgeFallback.get("outside_temp") + "/"
+                        + metricBridgeFallback.get("wheel_heat"));
+
+        // Mismatched unpopulated 0.0 F alongside 20.0 C on a Metric vehicle
+        OccupantSignalProbe.CabinState metricUnitOnly = new OccupantSignalProbe.CabinState(
+                soloEmpty, "-", "-", "0", 1, 1, 1, 0, false,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                OccupantSignalProbe.TEMP_UNIT_C);
+        Map<String, String> fixedMismatch = ComfortPolicy.mergeCabinFallback(
+                state("outside_temp_f", "0.0", "outside_temp", "20.0"),
+                metricUnitOnly);
+        check("mergeCabinFallback resolves mismatched 0.0 F vs 20.0 C using vehicle Metric unit",
+                "68/20.0",
+                fixedMismatch.get("outside_temp_f") + "/" + fixedMismatch.get("outside_temp"));
+
+        check("formatAmbientDisplay formats tenths in Metric and whole degrees in Imperial",
+                "18.5°C / 65°F",
+                ComfortPolicy.formatAmbientDisplay(state("outside_temp", "18.5"), true)
+                        + " / "
+                        + ComfortPolicy.formatAmbientDisplay(state("outside_temp", "18.5"), false));
+
+        // CabinState.resolveTempUnit & 11-field wire compatibility
+        check("resolveTempUnit detects Metric (USM=0, km=0, DATC=1)",
+                OccupantSignalProbe.TEMP_UNIT_C,
+                OccupantSignalProbe.CabinState.resolveTempUnit(0, 0, 1, 0, 0, 0));
+        check("resolveTempUnit detects Imperial (USM=1, mi=1, DATC=2)",
+                OccupantSignalProbe.TEMP_UNIT_F,
+                OccupantSignalProbe.CabinState.resolveTempUnit(1, 1, 2, 1, 1, 1));
+        check("resolveTempUnit supports Metric C paired with miles (UK/Canada)",
+                OccupantSignalProbe.TEMP_UNIT_C,
+                OccupantSignalProbe.CabinState.resolveTempUnit(0, 1, 0, -1, -1, -1));
+        check("resolveTempUnit falls back to DATC=1 (C) when USM returns 250 unsupported",
+                OccupantSignalProbe.TEMP_UNIT_C,
+                OccupantSignalProbe.CabinState.resolveTempUnit(250, 0, 1, -1, -1, -1));
+        check("resolveTempUnit guards pre-CAN USM=0 when DATC=2 confirms Fahrenheit",
+                OccupantSignalProbe.TEMP_UNIT_F,
+                OccupantSignalProbe.CabinState.resolveTempUnit(0, -1, 2, -1, -1, -1));
+
+        OccupantSignalProbe.CabinState decoded11 =
+                OccupantSignalProbe.CabinState.decode(metricPushCabin.encode());
+        check("CabinState 11-field encode/decode preserves TEMP_UNIT_C",
+                OccupantSignalProbe.TEMP_UNIT_C, decoded11.tempUnit);
+        String legacy10Field = soloEmpty.encode() + "\t34.0\t1.1\t0\t1\t1\t1\t0\t0\t1,1,1";
+        check("CabinState 10-field legacy decode defaults tempUnit to TEMP_UNIT_UNKNOWN",
+                OccupantSignalProbe.TEMP_UNIT_UNKNOWN,
+                OccupantSignalProbe.CabinState.decode(legacy10Field).tempUnit);
+
+        // ComfortConfig Metric defaults, 1 C steppers, 3 C comfort buffer, and custom C preservation
+        check("ComfortConfig defaults derive clean Metric C tiers (-4/3/10, wheel 7, vent 24/29/35)",
+                "-4/3/10/7/24/29/35",
+                def.heatHighC + "/" + def.heatMedC + "/" + def.heatLowC + "/" + def.wheelC + "/"
+                        + def.ventLowC + "/" + def.ventMedC + "/" + def.ventHighC);
+        ComfortConfig metricStepUp = def.withAdjustedThreshold(1, 1, true);
+        check("Metric threshold +1 C increments heatMedC to 4 C",
+                4, metricStepUp.heatMedC);
+        check("withClimateEnabled preserves custom Metric heatMedC=4 C",
+                4, metricStepUp.withClimateEnabled(true).heatMedC);
+
+        ComfortConfig metricTightGap = def
+                .withAdjustedThreshold(2, 11, true); // 10 + 11 = 21 C vs ventLowC = 24 C (3 C gap)
+        ComfortConfig metricGapPush = metricTightGap.withAdjustedThreshold(2, 1, true);
+        check("Metric raising heatLowC into 3 C comfort buffer cascades ventLowC up by 1 C",
+                "22/25", metricGapPush.heatLowC + "/" + metricGapPush.ventLowC);
+
+        // Direct Metric (C) evaluation in ComfortPolicy (no F-rounding drift)
+        ComfortPolicy.Plan metricWinter = ComfortPolicy.evaluateClimate(
+                metricStepUp,
+                state("outside_temp", "4.0", "outside_temp_f", "39.2",
+                        "seat_state.driver", "2", "wheel_heat", "0"),
+                soloEmpty,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                true);
+        check("Metric evaluateClimate at 4.0 C with heatMedC=4 triggers medium heat + wheel without F drift",
+                "seat_heat driver medium | wheel_heat on",
+                actions(metricWinter.actions));
+        check("Metric evaluateClimate formats summary in °C",
+                true, metricWinter.summary.startsWith("4°C:"));
+
+        ComfortPolicy.Plan metricDeepFreeze = ComfortPolicy.evaluateClimate(
+                def,
+                state("outside_temp", "-4.5", "seat_state.driver", "2", "wheel_heat", "0"),
+                soloEmpty,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                true);
+        check("Metric evaluateClimate at -4.5 C triggers high heat + wheel and formats tenths",
+                "true:seat_heat driver high | wheel_heat on",
+                metricDeepFreeze.summary.startsWith("-4.5°C:") + ":" + actions(metricDeepFreeze.actions));
+
+        ComfortPolicy.Plan metricSummer = ComfortPolicy.evaluateClimate(
+                autoPass,
+                state("outside_temp", "30.0", "seat_state.driver", "2", "seat_state.passenger", "2"),
+                soloEmpty,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                true);
+        check("Metric evaluateClimate at 30.0 C triggers driver vent medium while solo",
+                "seat_vent driver medium", actions(metricSummer.actions));
+
+        ComfortPolicy.Plan metricBoarding = ComfortPolicy.evaluatePassengerBoarding(
+                autoPass,
+                state("outside_temp", "30.0", "seat_state.passenger", "2"),
+                seatedBuckled,
+                OccupantSignalProbe.SeatCapabilities.ALL_EQUIPPED,
+                true);
+        check("Metric evaluatePassengerBoarding at 30.0 C cools late-boarding passenger with °C summary",
+                "Passenger detected (30°C): passenger vent medium -> seat_vent passenger medium",
+                metricBoarding.summary + " -> " + actions(metricBoarding.actions));
+
         System.exit(fail);
     }
 }

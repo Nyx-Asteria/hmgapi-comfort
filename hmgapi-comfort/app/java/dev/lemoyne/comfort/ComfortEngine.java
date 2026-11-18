@@ -48,6 +48,7 @@ public final class ComfortEngine {
         public final String lastClimateStatus;
         public final String lastWelcomeStatus;
         public final boolean connected;
+        public final boolean metricUnits;
 
         Snapshot(
                 ComfortConfig config,
@@ -58,6 +59,20 @@ public final class ComfortEngine {
                 String lastClimateStatus,
                 String lastWelcomeStatus,
                 boolean connected) {
+            this(config, readings, passengerPresence, cabinState, seatCaps,
+                    lastClimateStatus, lastWelcomeStatus, connected, false);
+        }
+
+        Snapshot(
+                ComfortConfig config,
+                Map<String, String> readings,
+                OccupantSignalProbe.PassengerPresence passengerPresence,
+                OccupantSignalProbe.CabinState cabinState,
+                OccupantSignalProbe.SeatCapabilities seatCaps,
+                String lastClimateStatus,
+                String lastWelcomeStatus,
+                boolean connected,
+                boolean metricUnits) {
             this.config = config;
             this.readings = readings;
             this.passengerPresence = passengerPresence == null
@@ -72,6 +87,7 @@ public final class ComfortEngine {
             this.lastClimateStatus = lastClimateStatus;
             this.lastWelcomeStatus = lastWelcomeStatus;
             this.connected = connected;
+            this.metricUnits = metricUnits;
         }
     }
 
@@ -159,6 +175,7 @@ public final class ComfortEngine {
             OccupantSignalProbe.CabinState.UNAVAILABLE;
     private volatile OccupantSignalProbe.SeatCapabilities seatCaps =
             OccupantSignalProbe.SeatCapabilities.UNKNOWN;
+    private volatile int tempUnit = OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
     private volatile String lastClimateStatus = "Waiting for vehicle start";
     private volatile String lastWelcomeStatus = "Armed for startup";
     private volatile boolean connected;
@@ -180,6 +197,7 @@ public final class ComfortEngine {
     private ComfortEngine(Context appContext) {
         this.appContext = appContext;
         this.seatCaps = loadCachedSeatCapabilities(appContext);
+        this.tempUnit = loadCachedTempUnit(appContext);
     }
 
     private static OccupantSignalProbe.SeatCapabilities loadCachedSeatCapabilities(Context ctx) {
@@ -193,6 +211,23 @@ public final class ComfortEngine {
         } catch (Throwable ignored) {
             return OccupantSignalProbe.SeatCapabilities.UNKNOWN;
         }
+    }
+
+    private static int loadCachedTempUnit(Context ctx) {
+        if (ctx == null) return OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(HW_PREFS, Context.MODE_PRIVATE);
+            int u = sp.getInt("temp_unit", OccupantSignalProbe.TEMP_UNIT_UNKNOWN);
+            return (u == OccupantSignalProbe.TEMP_UNIT_C || u == OccupantSignalProbe.TEMP_UNIT_F)
+                    ? u
+                    : OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
+        } catch (Throwable ignored) {
+            return OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
+        }
+    }
+
+    private boolean isMetricUnits() {
+        return tempUnit == OccupantSignalProbe.TEMP_UNIT_C;
     }
 
     private void updateSeatCapabilities(OccupantSignalProbe.SeatCapabilities live) {
@@ -211,6 +246,30 @@ public final class ComfortEngine {
             } catch (Throwable ignored) {
             }
             Log.i(TAG, "[hmgapi-comfort] detected seat hardware capabilities: " + next.summary());
+        }
+    }
+
+    private void updateTempUnit(int liveUnit, Map<String, String> rawReadings) {
+        int next = OccupantSignalProbe.TEMP_UNIT_UNKNOWN;
+        if (liveUnit == OccupantSignalProbe.TEMP_UNIT_C || liveUnit == OccupantSignalProbe.TEMP_UNIT_F) {
+            next = liveUnit;
+        } else if (this.tempUnit == OccupantSignalProbe.TEMP_UNIT_UNKNOWN && rawReadings != null) {
+            float f = ComfortPolicy.parseAmbientF(rawReadings.get("outside_temp_f"));
+            float c = ComfortPolicy.parseAmbientC(rawReadings.get("outside_temp"));
+            if (Float.isNaN(f) && !Float.isNaN(c)) {
+                next = OccupantSignalProbe.TEMP_UNIT_C;
+            }
+        }
+        if ((next == OccupantSignalProbe.TEMP_UNIT_C || next == OccupantSignalProbe.TEMP_UNIT_F)
+                && next != this.tempUnit) {
+            this.tempUnit = next;
+            try {
+                SharedPreferences sp = appContext.getSharedPreferences(HW_PREFS, Context.MODE_PRIVATE);
+                sp.edit().putInt("temp_unit", next).apply();
+            } catch (Throwable ignored) {
+            }
+            Log.i(TAG, "[hmgapi-comfort] detected vehicle temperature unit: "
+                    + (next == OccupantSignalProbe.TEMP_UNIT_C ? "C" : "F"));
         }
     }
 
@@ -251,7 +310,7 @@ public final class ComfortEngine {
     public Snapshot snapshot() {
         return new Snapshot(config, new LinkedHashMap<String, String>(lastReadings),
                 lastPassengerPresence, lastCabinState, seatCaps,
-                lastClimateStatus, lastWelcomeStatus, connected);
+                lastClimateStatus, lastWelcomeStatus, connected, isMetricUnits());
     }
 
     public void setUiForeground(boolean foreground) {
@@ -340,6 +399,7 @@ public final class ComfortEngine {
             cabin = OccupantSignalProbe.CabinState.UNAVAILABLE;
         }
         updateSeatCapabilities(cabin.seatCaps);
+        updateTempUnit(cabin.tempUnit, raw);
         Map<String, String> merged = ComfortPolicy.mergeCabinFallback(raw, cabin);
         lastReadings = merged;
         lastCabinState = cabin;
@@ -376,10 +436,12 @@ public final class ComfortEngine {
                 welcomeTracker.onSuspendCheck(sleepGap, now);
                 welcomeTracker.onWakeSeqCheck(wakeSeq, now);
 
-                if (seatCaps.frontVent == -1 || seatCaps.rearLeftHeat == -1 || seatCaps.rearRightHeat == -1) {
+                if (seatCaps.frontVent == -1 || seatCaps.rearLeftHeat == -1 || seatCaps.rearRightHeat == -1
+                        || tempUnit == OccupantSignalProbe.TEMP_UNIT_UNKNOWN) {
                     OccupantSignalProbe.CabinState earlyCabin = occupancyClient.queryCabinState();
                     if (earlyCabin != null) {
                         updateSeatCapabilities(earlyCabin.seatCaps);
+                        updateTempUnit(earlyCabin.tempUnit, null);
                     }
                 }
 
@@ -475,8 +537,8 @@ public final class ComfortEngine {
                 } else if (config.climateEnabled
                         && !driveTracker.isCompleted()
                         && ComfortPolicy.isPluggedInAccStandby(v, interactive, cabin.ignOn)) {
-                    float ambF = ComfortPolicy.parseAmbientF(v.get("outside_temp_f"));
-                    String ambTag = Float.isNaN(ambF) ? "" : (" (" + Math.round(ambF) + "°F)");
+                    String ambDisp = ComfortPolicy.formatAmbientDisplay(v, isMetricUnits());
+                    String ambTag = ambDisp.isEmpty() ? "" : (" (" + ambDisp + ")");
                     String nextMsg = "Charging (ACC)" + ambTag
                             + " — press Start (no brake) for Ignition ON & heaters";
                     if (!showingAccStandbyNote || !lastClimateStatus.endsWith(nextMsg)) {
@@ -581,11 +643,11 @@ public final class ComfortEngine {
             }
             sleepQuietly(1500);   // let BCM/USM/VR settle after EV Ready / cabin power transition
         }
-        // Wait up to 60 s for valid post-wake outside_temp_f and BCM seat climate readiness
+        // Wait up to 60 s for valid post-wake outside temperature (°C or °F) and BCM seat climate readiness
         // (bounded to 5 s when manually tapped in ACC standby so the UI responds promptly)
         Map<String, String> v = null;
         OccupantSignalProbe.CabinState cabin = lastCabinState;
-        float tempF = Float.NaN;
+        boolean hasTemp = false;
         long tempValidSince = 0L;
         int powerLostTicks = 0;
         boolean initialAccManual = manual
@@ -619,17 +681,18 @@ public final class ComfortEngine {
                     powerLostTicks = 0;
                 }
             }
-            tempF = ComfortPolicy.parseAmbientF(v.get("outside_temp_f"));
+            hasTemp = !Float.isNaN(ComfortPolicy.readAmbientF(v));
             boolean inAccStandby = !"1".equals(v.get("hv.ready"))
                     && !ComfortPolicy.isBcmSeatClimateReady(v)
                     && cabin.ignOn == 0;
-            if (manual && inAccStandby && (!Float.isNaN(tempF) || cabin.datcSentinel)) {
-                String ambTag = Float.isNaN(tempF) ? "" : (" (" + Math.round(tempF) + "°F)");
+            if (manual && inAccStandby && (hasTemp || cabin.datcSentinel)) {
+                String ambDisp = ComfortPolicy.formatAmbientDisplay(v, isMetricUnits());
+                String ambTag = ambDisp.isEmpty() ? "" : (" (" + ambDisp + ")");
                 lastClimateStatus = stamp("Ignition in ACC" + ambTag
                         + " — press Start (no brake) for Ignition ON & heaters");
                 return;
             }
-            if (!Float.isNaN(tempF)) {
+            if (hasTemp) {
                 if (tempValidSince == 0L) {
                     tempValidSince = SystemClock.elapsedRealtime();
                 }
@@ -653,13 +716,14 @@ public final class ComfortEngine {
                 && !"1".equals(v.get("hv.ready"))
                 && !ComfortPolicy.isBcmSeatClimateReady(v)
                 && cabin.ignOn == 0) {
-            String ambTag = Float.isNaN(tempF) ? "" : (" (" + Math.round(tempF) + "°F)");
+            String ambDisp = ComfortPolicy.formatAmbientDisplay(v, isMetricUnits());
+            String ambTag = ambDisp.isEmpty() ? "" : (" (" + ambDisp + ")");
             lastClimateStatus = stamp("Ignition in ACC" + ambTag
                     + " — press Start (no brake) for Ignition ON & heaters");
             return;
         }
 
-        if (Float.isNaN(tempF) || v == null) {
+        if (!hasTemp || v == null) {
             if (manual) {
                 lastClimateStatus = stamp("Outside temperature unavailable (check Ignition ON)");
                 return;
@@ -667,13 +731,13 @@ public final class ComfortEngine {
             if (tempTimeoutRetries < 2) {
                 tempTimeoutRetries++;
                 lastClimateStatus = stamp("Outside temperature delayed (retry " + tempTimeoutRetries + "/2)...");
-                Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable after 60 s; will retry ("
+                Log.w(TAG, "[hmgapi-comfort] outside temperature unavailable after 60 s; will retry ("
                         + tempTimeoutRetries + "/2)");
                 return;
             }
             driveTracker.markCompleted();
             lastClimateStatus = stamp("Skipped (outside temperature unavailable)");
-            Log.w(TAG, "[hmgapi-comfort] outside_temp_f unavailable; skipping climate for this session");
+            Log.w(TAG, "[hmgapi-comfort] outside temperature unavailable; skipping climate for this session");
             return;
         }
 
@@ -688,6 +752,7 @@ public final class ComfortEngine {
                 if (refreshed != null) {
                     cabin = refreshed;
                     updateSeatCapabilities(cabin.seatCaps);
+                    updateTempUnit(cabin.tempUnit, null);
                     presence = cabin.passenger;
                 }
             }
@@ -696,7 +761,8 @@ public final class ComfortEngine {
         lastPassengerPresence = presence;
 
         tempTimeoutRetries = 0;
-        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(config, tempF, v, presence, seatCaps);
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluateClimate(
+                config, v, presence, seatCaps, isMetricUnits());
         if (plan.actions.isEmpty()) {
             driveTracker.markCompleted();
             boardingTracker.onSessionClimateEvaluated(config, presence);
@@ -719,11 +785,11 @@ public final class ComfortEngine {
             HmgApi api,
             Map<String, String> v,
             OccupantSignalProbe.PassengerPresence presence) throws IOException {
-        float tempF = ComfortPolicy.parseAmbientF(v == null ? null : v.get("outside_temp_f"));
-        if (Float.isNaN(tempF)) {
+        if (Float.isNaN(ComfortPolicy.readAmbientF(v))) {
             return;
         }
-        ComfortPolicy.Plan plan = ComfortPolicy.evaluatePassengerBoarding(config, tempF, v, presence, seatCaps);
+        ComfortPolicy.Plan plan = ComfortPolicy.evaluatePassengerBoarding(
+                config, v, presence, seatCaps, isMetricUnits());
         boardingTracker.markBoardingHandled();
         if (plan.actions.isEmpty()) {
             Log.i(TAG, "[hmgapi-comfort] " + plan.summary);
@@ -827,24 +893,48 @@ public final class ComfortEngine {
     public static ComfortConfig parseConfig(JSONObject j) {
         ComfortConfig d = ComfortConfig.defaults();
         if (j == null) return d;
+        boolean welcomeDismiss = j.optBoolean("welcome_dismiss", d.welcomeDismiss);
+        int welcomeDelayMs = j.optInt("welcome_delay_ms", d.welcomeDelayMs);
+        boolean climateEnabled = j.optBoolean("climate_enabled", d.climateEnabled);
+        int heatHighF = j.optInt("heat_high_f", d.heatHighF);
+        int heatMedF = j.optInt("heat_med_f", d.heatMedF);
+        int heatLowF = j.optInt("heat_low_f", d.heatLowF);
+        boolean wheelEnabled = j.optBoolean("wheel_enabled", d.wheelEnabled);
+        int wheelF = j.optInt("wheel_f", d.wheelF);
+        String passengerPolicy = j.optString("passenger_policy", d.passengerPolicy);
+        boolean passengerAutoDetect = j.optBoolean("passenger_auto_detect", d.passengerAutoDetect);
+        String rearLeftPolicy = j.optString("rear_left_policy", d.rearLeftPolicy);
+        String rearRightPolicy = j.optString("rear_right_policy", d.rearRightPolicy);
+        boolean ventEnabled = j.optBoolean("vent_enabled", d.ventEnabled);
+        int ventLowF = j.optInt("vent_low_f", d.ventLowF);
+        int ventMedF = j.optInt("vent_med_f", d.ventMedF);
+        int ventHighF = j.optInt("vent_high_f", d.ventHighF);
+        boolean toastOnApply = j.optBoolean("toast_on_apply", d.toastOnApply);
+        if (j.has("heat_high_c")) {
+            return new ComfortConfig(
+                    welcomeDismiss, welcomeDelayMs,
+                    climateEnabled, heatHighF, heatMedF, heatLowF,
+                    wheelEnabled, wheelF,
+                    passengerPolicy, passengerAutoDetect,
+                    rearLeftPolicy, rearRightPolicy,
+                    ventEnabled, ventLowF, ventMedF, ventHighF,
+                    toastOnApply,
+                    j.optInt("heat_high_c", ComfortConfig.fToC(heatHighF)),
+                    j.optInt("heat_med_c", ComfortConfig.fToC(heatMedF)),
+                    j.optInt("heat_low_c", ComfortConfig.fToC(heatLowF)),
+                    j.optInt("wheel_c", ComfortConfig.fToC(wheelF)),
+                    j.optInt("vent_low_c", ComfortConfig.fToC(ventLowF)),
+                    j.optInt("vent_med_c", ComfortConfig.fToC(ventMedF)),
+                    j.optInt("vent_high_c", ComfortConfig.fToC(ventHighF)));
+        }
         return new ComfortConfig(
-                j.optBoolean("welcome_dismiss", d.welcomeDismiss),
-                j.optInt("welcome_delay_ms", d.welcomeDelayMs),
-                j.optBoolean("climate_enabled", d.climateEnabled),
-                j.optInt("heat_high_f", d.heatHighF),
-                j.optInt("heat_med_f", d.heatMedF),
-                j.optInt("heat_low_f", d.heatLowF),
-                j.optBoolean("wheel_enabled", d.wheelEnabled),
-                j.optInt("wheel_f", d.wheelF),
-                j.optString("passenger_policy", d.passengerPolicy),
-                j.optBoolean("passenger_auto_detect", d.passengerAutoDetect),
-                j.optString("rear_left_policy", d.rearLeftPolicy),
-                j.optString("rear_right_policy", d.rearRightPolicy),
-                j.optBoolean("vent_enabled", d.ventEnabled),
-                j.optInt("vent_low_f", d.ventLowF),
-                j.optInt("vent_med_f", d.ventMedF),
-                j.optInt("vent_high_f", d.ventHighF),
-                j.optBoolean("toast_on_apply", d.toastOnApply));
+                welcomeDismiss, welcomeDelayMs,
+                climateEnabled, heatHighF, heatMedF, heatLowF,
+                wheelEnabled, wheelF,
+                passengerPolicy, passengerAutoDetect,
+                rearLeftPolicy, rearRightPolicy,
+                ventEnabled, ventLowF, ventMedF, ventHighF,
+                toastOnApply);
     }
 
     public static JSONObject toJson(ComfortConfig c) throws JSONException {
@@ -866,6 +956,13 @@ public final class ComfortEngine {
         j.put("vent_med_f", c.ventMedF);
         j.put("vent_high_f", c.ventHighF);
         j.put("toast_on_apply", c.toastOnApply);
+        j.put("heat_high_c", c.heatHighC);
+        j.put("heat_med_c", c.heatMedC);
+        j.put("heat_low_c", c.heatLowC);
+        j.put("wheel_c", c.wheelC);
+        j.put("vent_low_c", c.ventLowC);
+        j.put("vent_med_c", c.ventMedC);
+        j.put("vent_high_c", c.ventHighC);
         return j;
     }
 

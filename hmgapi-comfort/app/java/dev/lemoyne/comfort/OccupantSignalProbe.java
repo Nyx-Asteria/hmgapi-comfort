@@ -26,6 +26,10 @@ public final class OccupantSignalProbe {
 
     public static final int DEFAULT_PORT = 35821;
 
+    public static final int TEMP_UNIT_UNKNOWN = -1;
+    public static final int TEMP_UNIT_C = 0;
+    public static final int TEMP_UNIT_F = 1;
+
     private static final int MAX_FRAME_BYTES = 64 * 1024;
 
     public interface PushTelemetrySource {
@@ -35,6 +39,7 @@ public final class OccupantSignalProbe {
         String outsideTempC();
         String wheelHeat();
         boolean isDatcSentinel();
+        int tempUnit();
     }
 
     public interface SignalSource {
@@ -285,13 +290,14 @@ public final class OccupantSignalProbe {
      *  - ign3On: DATC.isIGN3Status (1 = IGN3 active during charging/utility/ready, 0 = OFF, -1 = unknown)
      *  - avAwake: 1 = display & AV active, 0 = BlackScreen / AV-Off / Display-Off, -1 = unknown
      *  - mobisSleeping: 1 = Mobis BlackScreen or AV-Off QuickBoot standby, 0 = awake, -1 = unknown
-     *  - datcSentinel: true when DATC pushed -40.0 F raw-zero sentinel (unpowered IG1/ACC)
+     *  - datcSentinel: true when DATC pushed -40.0 F / -40.0 C raw-zero sentinel (unpowered IG1/ACC)
      *  - seatCaps: vehicle hardware presence for ventilated front seats & heated rear seats
+     *  - tempUnit: vehicle temperature display unit (0 = Celsius, 1 = Fahrenheit, -1 = unknown)
      */
     public static final class CabinState {
         public static final CabinState UNAVAILABLE = new CabinState(
                 PassengerPresence.UNAVAILABLE, "-", "-", "-", -1, -1, -1, -1, false,
-                SeatCapabilities.UNKNOWN);
+                SeatCapabilities.UNKNOWN, TEMP_UNIT_UNKNOWN);
 
         public final PassengerPresence passenger;
         public final String outsideTempF;
@@ -303,6 +309,7 @@ public final class OccupantSignalProbe {
         public final int mobisSleeping;
         public final boolean datcSentinel;
         public final SeatCapabilities seatCaps;
+        public final int tempUnit;
 
         public CabinState(
                 PassengerPresence passenger,
@@ -316,7 +323,7 @@ public final class OccupantSignalProbe {
                 boolean datcSentinel) {
             this(passenger, outsideTempF, outsideTempC, wheelHeat,
                     ignOn, ign3On, avAwake, mobisSleeping, datcSentinel,
-                    SeatCapabilities.UNKNOWN);
+                    SeatCapabilities.UNKNOWN, TEMP_UNIT_UNKNOWN);
         }
 
         public CabinState(
@@ -330,6 +337,23 @@ public final class OccupantSignalProbe {
                 int mobisSleeping,
                 boolean datcSentinel,
                 SeatCapabilities seatCaps) {
+            this(passenger, outsideTempF, outsideTempC, wheelHeat,
+                    ignOn, ign3On, avAwake, mobisSleeping, datcSentinel,
+                    seatCaps, TEMP_UNIT_UNKNOWN);
+        }
+
+        public CabinState(
+                PassengerPresence passenger,
+                String outsideTempF,
+                String outsideTempC,
+                String wheelHeat,
+                int ignOn,
+                int ign3On,
+                int avAwake,
+                int mobisSleeping,
+                boolean datcSentinel,
+                SeatCapabilities seatCaps,
+                int tempUnit) {
             this.passenger = passenger == null ? PassengerPresence.UNAVAILABLE : passenger;
             this.outsideTempF = normField(outsideTempF);
             this.outsideTempC = normField(outsideTempC);
@@ -340,6 +364,7 @@ public final class OccupantSignalProbe {
             this.mobisSleeping = mobisSleeping;
             this.datcSentinel = datcSentinel;
             this.seatCaps = seatCaps == null ? SeatCapabilities.UNKNOWN : seatCaps;
+            this.tempUnit = normTempUnit(tempUnit);
         }
 
         public static int computeAvAwake(int blackScreen, int avPowerOff, int displayOffMode) {
@@ -362,11 +387,65 @@ public final class OccupantSignalProbe {
             return -1;
         }
 
+        /**
+         * Resolves the vehicle's active temperature unit ({@link #TEMP_UNIT_C}, {@link #TEMP_UNIT_F},
+         * or {@link #TEMP_UNIT_UNKNOWN}) across Gen5W USM, DATC, HSCAN, and live {@code DatcStatus}:
+         *  - {@code USM.getTemperatureUnit}: {@code 0} = °C, {@code 1} = °F ({@code 250} = unsupported)
+         *  - {@code USM.getDistanceSpeedUnit}: {@code 0} = km, {@code 1} = mi (confirms USM initialized)
+         *  - {@code DATC.getTemperatureUnit}: {@code 1} = °C, {@code 2} = °F ({@code 0} = uninitialized)
+         *  - {@code HSCAN.getFATC6_CR_Fatc_TempDispUnit} / {@code getTeperatureUnit}: {@code 0} = °C, {@code 1} = °F
+         *  - {@code pushDatcUnit}: {@code 0} = °C, {@code 1} = °F from active {@code DatcStatus} field validity
+         */
+        public static int resolveTempUnit(
+                int usmTempUnit,
+                int usmDistUnit,
+                int datcTempUnit,
+                int hscanFatcUnit,
+                int hscanTempUnit,
+                int pushDatcUnit) {
+            boolean usmReady = (usmDistUnit == 0 || usmDistUnit == 1);
+            if (usmTempUnit == 1) {
+                return TEMP_UNIT_F;
+            }
+            if (usmTempUnit == 0) {
+                if (datcTempUnit == 2 || (datcTempUnit != 1 && pushDatcUnit == TEMP_UNIT_F)) {
+                    return TEMP_UNIT_F;
+                }
+                if (usmReady || datcTempUnit == 1 || pushDatcUnit == TEMP_UNIT_C
+                        || hscanFatcUnit == 0 || hscanTempUnit == 0) {
+                    return TEMP_UNIT_C;
+                }
+            }
+            if (datcTempUnit == 1) {
+                return TEMP_UNIT_C;
+            }
+            if (datcTempUnit == 2) {
+                return TEMP_UNIT_F;
+            }
+            if (pushDatcUnit == TEMP_UNIT_C || pushDatcUnit == TEMP_UNIT_F) {
+                return pushDatcUnit;
+            }
+            if ((hscanFatcUnit == 0 || hscanFatcUnit == 1) && usmReady) {
+                return hscanFatcUnit == 0 ? TEMP_UNIT_C : TEMP_UNIT_F;
+            }
+            if ((hscanTempUnit == 0 || hscanTempUnit == 1) && usmReady) {
+                return hscanTempUnit == 0 ? TEMP_UNIT_C : TEMP_UNIT_F;
+            }
+            return TEMP_UNIT_UNKNOWN;
+        }
+
         public static CabinState fromSignalMap(Map<String, String> m) {
             if (m == null || m.isEmpty()) return UNAVAILABLE;
             int black = parseTriState(m.get("BLACKSCREEN.isBlackScreenShown"));
             int avOff = parseTriState(m.get("POWER.isAvPowerOff"));
             int dispOff = parseTriState(m.get("POWER.isDisplayOffMode"));
+            int unit = resolveTempUnit(
+                    PassengerPresence.parseRawInt(m.get("USM.getTemperatureUnit")),
+                    PassengerPresence.parseRawInt(m.get("USM.getDistanceSpeedUnit")),
+                    PassengerPresence.parseRawInt(m.get("DATC.getTemperatureUnit")),
+                    PassengerPresence.parseRawInt(m.get("HSCAN.getFATC6_CR_Fatc_TempDispUnit")),
+                    PassengerPresence.parseRawInt(m.get("HSCAN.getTeperatureUnit")),
+                    PassengerPresence.parseRawInt(m.get("PUSH.temp_unit")));
             return new CabinState(
                     PassengerPresence.fromSignalMap(m),
                     m.get("PUSH.outside_temp_f"),
@@ -377,7 +456,8 @@ public final class OccupantSignalProbe {
                     computeAvAwake(black, avOff, dispOff),
                     computeMobisSleeping(black, avOff),
                     parseTriState(m.get("PUSH.datc_sentinel")) == 1,
-                    SeatCapabilities.fromSignalMap(m));
+                    SeatCapabilities.fromSignalMap(m),
+                    unit);
         }
 
         public String encode() {
@@ -390,7 +470,8 @@ public final class OccupantSignalProbe {
                     + avAwake + "\t"
                     + mobisSleeping + "\t"
                     + (datcSentinel ? "1" : "0") + "\t"
-                    + seatCaps.encode();
+                    + seatCaps.encode() + "\t"
+                    + tempUnit;
         }
 
         public static CabinState decode(String wire) {
@@ -400,6 +481,9 @@ public final class OccupantSignalProbe {
             SeatCapabilities caps = p.length >= 10
                     ? SeatCapabilities.decode(p[9])
                     : SeatCapabilities.UNKNOWN;
+            int unit = p.length >= 11
+                    ? PassengerPresence.parseRawInt(p[10])
+                    : TEMP_UNIT_UNKNOWN;
             return new CabinState(
                     PassengerPresence.decode(p[0]),
                     p[1],
@@ -410,17 +494,25 @@ public final class OccupantSignalProbe {
                     PassengerPresence.parseRawInt(p[6]),
                     PassengerPresence.parseRawInt(p[7]),
                     "1".equals(p[8].trim()),
-                    caps);
+                    caps,
+                    unit);
         }
 
         public String summary() {
+            String u = tempUnit == TEMP_UNIT_C ? "C" : (tempUnit == TEMP_UNIT_F ? "F" : "-");
             return "ign=" + triName(ignOn)
                     + " ign3=" + triName(ign3On)
                     + " av_awake=" + triName(avAwake)
+                    + " unit=" + u
                     + " push_temp_f=" + outsideTempF
+                    + " push_temp_c=" + outsideTempC
                     + (datcSentinel ? "(sentinel)" : "")
                     + " push_wheel=" + wheelHeat
                     + " caps=[" + seatCaps.summary() + "]";
+        }
+
+        private static int normTempUnit(int u) {
+            return (u == TEMP_UNIT_C || u == TEMP_UNIT_F) ? u : TEMP_UNIT_UNKNOWN;
         }
 
         private static String normField(String s) {
@@ -691,6 +783,11 @@ public final class OccupantSignalProbe {
         private BoundGetter bgUsmAstSeatOpt;
         private BoundGetter bgUsmRlSeatOpt;
         private BoundGetter bgUsmRrSeatOpt;
+        private BoundGetter bgUsmTempUnit;
+        private BoundGetter bgUsmDistUnit;
+        private BoundGetter bgDatcTempUnit;
+        private BoundGetter bgHscanFatcTempUnit;
+        private BoundGetter bgHscanTempUnit;
 
         ReflectionGen5wSignalSource() {
             this(null);
@@ -718,6 +815,11 @@ public final class OccupantSignalProbe {
             int ign3On;
             int avAwake;
             int mobisSleeping;
+            int usmTempUnit;
+            int usmDistUnit;
+            int datcTempUnit;
+            int hscanFatcUnit;
+            int hscanTempUnit;
             boolean sleepStandby;
             boolean unregisterSleep = false;
             synchronized (this) {
@@ -750,6 +852,12 @@ public final class OccupantSignalProbe {
                 avAwake = CabinState.computeAvAwake(black, avOff, dispOff);
                 mobisSleeping = CabinState.computeMobisSleeping(black, avOff);
 
+                usmTempUnit = invokeIntGetter(bgUsmTempUnit, -1);
+                usmDistUnit = invokeIntGetter(bgUsmDistUnit, -1);
+                datcTempUnit = invokeIntGetter(bgDatcTempUnit, -1);
+                hscanFatcUnit = invokeIntGetter(bgHscanFatcTempUnit, -1);
+                hscanTempUnit = invokeIntGetter(bgHscanTempUnit, -1);
+
                 sleepStandby = (mobisSleeping == 1 && ignOn != 1);
                 if (sleepStandby && pushAwake) {
                     pushAwake = false;
@@ -763,6 +871,7 @@ public final class OccupantSignalProbe {
             String tempC = "-";
             String wheel = "-";
             boolean sentinel = false;
+            int pushTempUnit = TEMP_UNIT_UNKNOWN;
             if (pushSource != null) {
                 if (sleepStandby) {
                     if (unregisterSleep) {
@@ -774,11 +883,15 @@ public final class OccupantSignalProbe {
                     tempC = pushSource.outsideTempC();
                     wheel = pushSource.wheelHeat();
                     sentinel = pushSource.isDatcSentinel();
+                    pushTempUnit = pushSource.tempUnit();
                 }
             }
+            int tempUnit = CabinState.resolveTempUnit(
+                    usmTempUnit, usmDistUnit, datcTempUnit,
+                    hscanFatcUnit, hscanTempUnit, pushTempUnit);
             return new CabinState(
                     passenger, tempF, tempC, wheel,
-                    ignOn, ign3On, avAwake, mobisSleeping, sentinel, seatCaps);
+                    ignOn, ign3On, avAwake, mobisSleeping, sentinel, seatCaps, tempUnit);
         }
 
         @Override
@@ -838,6 +951,11 @@ public final class OccupantSignalProbe {
             bgUsmAstSeatOpt = null;
             bgUsmRlSeatOpt = null;
             bgUsmRrSeatOpt = null;
+            bgUsmTempUnit = null;
+            bgUsmDistUnit = null;
+            bgDatcTempUnit = null;
+            bgHscanFatcTempUnit = null;
+            bgHscanTempUnit = null;
 
             try {
                 Class<?> smClass = Class.forName("android.os.ServiceManager");
@@ -858,7 +976,7 @@ public final class OccupantSignalProbe {
                 bgBcmRlSeatOpt = bindGetter(bcm, "getRLSeatHeatOption");
                 bgBcmRrSeatOpt = bindGetter(bcm, "getRRSeatHeatOption");
 
-                // 2. HSCAN (front-passenger occupancy & buckle status)
+                // 2. HSCAN (front-passenger occupancy, buckle status & FATC temperature unit)
                 BoundService hscan = null;
                 ClassLoader hcanLoader = ReflectionGen5wSignalSource.class.getClassLoader();
                 try {
@@ -877,24 +995,29 @@ public final class OccupantSignalProbe {
                 bgHscanOccupancy = bindGetter(hscan, "getOccupancy");
                 bgAsstBelt = bindGetter(hscan, "getAsstStBltSwSta");
                 bgPassStOcc = bindGetter(hscan, "getPassStOccSta");
+                bgHscanFatcTempUnit = bindGetter(hscan, "getFATC6_CR_Fatc_TempDispUnit");
+                bgHscanTempUnit = bindGetter(hscan, "getTeperatureUnit");
 
                 // 3. SYSTEM (ODS passenger mat classification)
                 BoundService sys = bindKnownService(getService, ibinderClass, carSvc,
                         "SYSTEM_SERVICE", "com.hkmc.micom.system", "com.hkmc.micom.ISystemService", null);
                 bgSysClassStatus = bindGetter(sys, "getClassStatus");
 
-                // 4. USM (fallback seat heat/vent hardware option codes)
+                // 4. USM (fallback seat option codes & owner temperature/distance unit settings)
                 BoundService usm = bindKnownService(getService, ibinderClass, carSvc,
                         "USM_SERVICE", "com.hkmc.micom.usm", "com.hkmc.usm.IUSMService", null);
                 bgUsmDrvSeatOpt = bindGetter(usm, "getFrontSeatHeat_DrvOption");
                 bgUsmAstSeatOpt = bindGetter(usm, "getFrontSeatHeat_AstOption");
                 bgUsmRlSeatOpt = bindGetter(usm, "getRearSeatHeat_LeftOption");
                 bgUsmRrSeatOpt = bindGetter(usm, "getRearSeatHeat_RightOption");
+                bgUsmTempUnit = bindGetter(usm, "getTemperatureUnit");
+                bgUsmDistUnit = bindGetter(usm, "getDistanceSpeedUnit");
 
-                // 5. DATC (IGN3 active status during charging/utility)
+                // 5. DATC (IGN3 active status during charging/utility & climate temperature unit)
                 BoundService datc = bindKnownService(getService, ibinderClass, carSvc,
                         "DATC_SERVICE", "com.hkmc.micom.datc", "com.hkmc.datc.IDATCService", null);
                 bgDatcIgn3Status = bindGetter(datc, "isIGN3Status");
+                bgDatcTempUnit = bindGetter(datc, "getTemperatureUnit");
 
                 // 6. BLACKSCREEN & POWER (Mobis QuickBoot sleep & Display-Off detection)
                 BoundService blackScreen = bindDescriptorService(

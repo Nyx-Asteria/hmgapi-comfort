@@ -65,9 +65,30 @@ public final class ComfortPolicy {
         }
     }
 
-    /** Rejects NaN, Infinite, and DATC's -40.0 F raw-zero uninitialized wake sentinel. */
+    /** Rejects NaN, Infinite, CAN sentinels (215/255), and DATC's -40.0 F raw-zero wake sentinel. */
     public static boolean validAmbientF(float f) {
         return !Float.isNaN(f) && !Float.isInfinite(f) && Math.abs(f + 40f) > 0.05f && f >= -58f && f <= 158f;
+    }
+
+    /** Rejects NaN, Infinite, CAN sentinels (87.5/101.7/123.9/255), and DATC's -40.0 C raw-zero wake sentinel. */
+    public static boolean validAmbientC(float c) {
+        return !Float.isNaN(c) && !Float.isInfinite(c) && Math.abs(c + 40f) > 0.05f && c >= -50f && c <= 70f;
+    }
+
+    public static float celsiusToFahrenheit(float c) {
+        return c * 9f / 5f + 32f;
+    }
+
+    public static float fahrenheitToCelsius(float f) {
+        return (f - 32f) * 5f / 9f;
+    }
+
+    public static String formatTenths(float v) {
+        int t = Math.round(v * 10f);
+        if (t % 10 == 0) {
+            return String.valueOf(t / 10);
+        }
+        return String.format(Locale.US, "%.1f", Float.valueOf(t / 10f));
     }
 
     /** Parses an outside_temp_f reading string ("28.5" or "-"), returning Float.NaN when unavailable or sentinel. */
@@ -81,10 +102,51 @@ public final class ComfortPolicy {
         }
     }
 
+    /** Parses an outside_temp (°C) reading string ("4.5" or "-"), returning Float.NaN when unavailable or sentinel. */
+    public static float parseAmbientC(String text) {
+        if (text == null || text.isEmpty() || "-".equals(text)) return Float.NaN;
+        try {
+            float c = Float.parseFloat(text.trim());
+            return validAmbientC(c) ? c : Float.NaN;
+        } catch (NumberFormatException e) {
+            return Float.NaN;
+        }
+    }
+
+    /** Reads ambient temperature in °F from a vehicle readings map, falling back to converting {@code outside_temp} (°C). */
+    public static float readAmbientF(Map<String, String> readings) {
+        if (readings == null) return Float.NaN;
+        float f = parseAmbientF(readings.get("outside_temp_f"));
+        if (!Float.isNaN(f)) return f;
+        float c = parseAmbientC(readings.get("outside_temp"));
+        return Float.isNaN(c) ? Float.NaN : celsiusToFahrenheit(c);
+    }
+
+    /** Reads ambient temperature in °C from a vehicle readings map, falling back to converting {@code outside_temp_f} (°F). */
+    public static float readAmbientC(Map<String, String> readings) {
+        if (readings == null) return Float.NaN;
+        float c = parseAmbientC(readings.get("outside_temp"));
+        if (!Float.isNaN(c)) return c;
+        float f = parseAmbientF(readings.get("outside_temp_f"));
+        return Float.isNaN(f) ? Float.NaN : fahrenheitToCelsius(f);
+    }
+
+    /** Formats live ambient temperature in the vehicle's active unit ("18.5°C" / "65°F"), or "" when unavailable. */
+    public static String formatAmbientDisplay(Map<String, String> readings, boolean metric) {
+        if (metric) {
+            float c = readAmbientC(readings);
+            return Float.isNaN(c) ? "" : formatTenths(c) + "°C";
+        }
+        float f = readAmbientF(readings);
+        return Float.isNaN(f) ? "" : Math.round(f) + "°F";
+    }
+
     /**
-     * Fills missing ("-") push-only vehicle readings ({@code outside_temp_f}, {@code outside_temp},
-     * {@code wheel_heat}) from {@link OccupantSignalProbe.CabinState}'s fresh Binder push bridge
-     * when HMG-API's {@code vehicle} hub has cleared them after a QuickBoot wake.
+     * Fills missing ("-") or sentinel ("255", "-40") push-only vehicle readings
+     * ({@code outside_temp_f}, {@code outside_temp}, {@code wheel_heat}) from
+     * {@link OccupantSignalProbe.CabinState}'s fresh Binder push bridge or cross-unit conversion,
+     * ensuring Metric (°C) vehicles work seamlessly even when HMG-API's {@code outside_temp_f}
+     * carries an unpopulated sentinel or holds at "-".
      */
     public static Map<String, String> mergeCabinFallback(
             Map<String, String> readings, OccupantSignalProbe.CabinState cabin) {
@@ -92,24 +154,65 @@ public final class ComfortPolicy {
         if (readings != null) {
             out.putAll(readings);
         }
-        if (cabin == null) {
-            return out;
-        }
-        if (Float.isNaN(parseAmbientF(out.get("outside_temp_f")))
-                && !Float.isNaN(parseAmbientF(cabin.outsideTempF))) {
-            out.put("outside_temp_f", cabin.outsideTempF);
-            String curC = out.get("outside_temp");
-            if ((curC == null || curC.isEmpty() || "-".equals(curC))
-                    && cabin.outsideTempC != null
-                    && !cabin.outsideTempC.isEmpty()
-                    && !"-".equals(cabin.outsideTempC)) {
+
+        float curF = parseAmbientF(out.get("outside_temp_f"));
+        float curC = parseAmbientC(out.get("outside_temp"));
+        float cabF = cabin == null ? Float.NaN : parseAmbientF(cabin.outsideTempF);
+        float cabC = cabin == null ? Float.NaN : parseAmbientC(cabin.outsideTempC);
+
+        // If HMG-API has mismatched F vs C (e.g. unpopulated 0.0 F alongside valid C), prefer CabinPushBridge
+        if (!Float.isNaN(curF) && !Float.isNaN(curC)
+                && Math.abs(curF - celsiusToFahrenheit(curC)) > 3.0f) {
+            if (!Float.isNaN(cabF) && !Float.isNaN(cabC)) {
+                curF = cabF;
+                curC = cabC;
+                out.put("outside_temp_f", cabin.outsideTempF);
                 out.put("outside_temp", cabin.outsideTempC);
+            } else if (cabin != null && cabin.tempUnit == OccupantSignalProbe.TEMP_UNIT_C) {
+                curF = celsiusToFahrenheit(curC);
+                out.put("outside_temp_f", formatTenths(curF));
+            } else if (cabin != null && cabin.tempUnit == OccupantSignalProbe.TEMP_UNIT_F) {
+                curC = fahrenheitToCelsius(curF);
+                out.put("outside_temp", formatTenths(curC));
             }
         }
-        String curWheel = out.get("wheel_heat");
-        if ((curWheel == null || curWheel.isEmpty() || "-".equals(curWheel))
-                && ("0".equals(cabin.wheelHeat) || "1".equals(cabin.wheelHeat))) {
-            out.put("wheel_heat", cabin.wheelHeat);
+
+        if (Float.isNaN(curF)) {
+            if (!Float.isNaN(cabF)) {
+                curF = cabF;
+                out.put("outside_temp_f", cabin.outsideTempF);
+            } else if (!Float.isNaN(curC)) {
+                curF = celsiusToFahrenheit(curC);
+                out.put("outside_temp_f", formatTenths(curF));
+            } else if (!Float.isNaN(cabC)) {
+                curF = celsiusToFahrenheit(cabC);
+                out.put("outside_temp_f", formatTenths(curF));
+            } else if (out.containsKey("outside_temp_f")) {
+                out.put("outside_temp_f", "-");
+            }
+        }
+
+        if (Float.isNaN(curC)) {
+            if (!Float.isNaN(cabC)) {
+                curC = cabC;
+                out.put("outside_temp", cabin.outsideTempC);
+            } else if (!Float.isNaN(curF)) {
+                curC = fahrenheitToCelsius(curF);
+                out.put("outside_temp", formatTenths(curC));
+            } else if (!Float.isNaN(cabF)) {
+                curC = fahrenheitToCelsius(cabF);
+                out.put("outside_temp", formatTenths(curC));
+            } else if (out.containsKey("outside_temp")) {
+                out.put("outside_temp", "-");
+            }
+        }
+
+        if (cabin != null) {
+            String curWheel = out.get("wheel_heat");
+            if ((curWheel == null || curWheel.isEmpty() || "-".equals(curWheel))
+                    && ("0".equals(cabin.wheelHeat) || "1".equals(cabin.wheelHeat))) {
+                out.put("wheel_heat", cabin.wheelHeat);
+            }
         }
         return out;
     }
@@ -132,6 +235,39 @@ public final class ComfortPolicy {
     }
 
     /**
+     * Unit-aware climate evaluation: compares {@code outside_temp} (°C) directly against {@code cfg.*C}
+     * when {@code metric} is true, or {@code outside_temp_f} (°F) against {@code cfg.*F} when false.
+     */
+    public static Plan evaluateClimate(
+            ComfortConfig cfg,
+            Map<String, String> readings,
+            OccupantSignalProbe.PassengerPresence passengerPresence,
+            OccupantSignalProbe.SeatCapabilities seatCaps,
+            boolean metric) {
+        if (!metric) {
+            return evaluateClimate(cfg, readAmbientF(readings), readings, passengerPresence, seatCaps);
+        }
+        float tempC = readAmbientC(readings);
+        if (!cfg.climateEnabled || !validAmbientC(tempC)) {
+            return new Plan(Collections.<Action>emptyList(), "Climate disabled or invalid ambient temp");
+        }
+        int driverHeat = 0;
+        if (tempC <= cfg.heatHighC) driverHeat = 3;
+        else if (tempC <= cfg.heatMedC) driverHeat = 2;
+        else if (tempC <= cfg.heatLowC) driverHeat = 1;
+
+        int driverVent = 0;
+        if (driverHeat == 0 && cfg.ventEnabled && tempC >= cfg.ventLowC) {
+            driverVent = tempC >= cfg.ventHighC ? 3 : (tempC >= cfg.ventMedC ? 2 : 1);
+        }
+        boolean wheelShouldRun = cfg.wheelEnabled && tempC <= cfg.wheelC;
+        return buildClimatePlan(
+                cfg, readings, passengerPresence, seatCaps,
+                driverHeat, driverVent, wheelShouldRun,
+                formatTenths(tempC) + "°C");
+    }
+
+    /**
      * Evaluates cold-start heat, steering wheel heat, and summer ventilation targets for a drive,
      * skipping any seat or wheel already active from Bluelink remote climate or manual driver input,
      * gating front-passenger heat/ventilation on live passenger seat occupancy when enabled, and
@@ -146,16 +282,36 @@ public final class ComfortPolicy {
         if (!cfg.climateEnabled || !validAmbientF(tempF)) {
             return new Plan(Collections.<Action>emptyList(), "Climate disabled or invalid ambient temp");
         }
+        int driverHeat = 0;
+        if (tempF <= cfg.heatHighF) driverHeat = 3;
+        else if (tempF <= cfg.heatMedF) driverHeat = 2;
+        else if (tempF <= cfg.heatLowF) driverHeat = 1;
+
+        int driverVent = 0;
+        if (driverHeat == 0 && cfg.ventEnabled && tempF >= cfg.ventLowF) {
+            driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
+        }
+        boolean wheelShouldRun = cfg.wheelEnabled && tempF <= cfg.wheelF;
+        return buildClimatePlan(
+                cfg, readings, passengerPresence, seatCaps,
+                driverHeat, driverVent, wheelShouldRun,
+                String.format(Locale.US, "%.1f F", Float.valueOf(tempF)));
+    }
+
+    private static Plan buildClimatePlan(
+            ComfortConfig cfg,
+            Map<String, String> readings,
+            OccupantSignalProbe.PassengerPresence passengerPresence,
+            OccupantSignalProbe.SeatCapabilities seatCaps,
+            int driverHeat,
+            int driverVent,
+            boolean wheelShouldRun,
+            String tempLabel) {
         OccupantSignalProbe.SeatCapabilities caps = seatCaps == null
                 ? OccupantSignalProbe.SeatCapabilities.UNKNOWN
                 : seatCaps;
         List<Action> out = new ArrayList<Action>();
         List<String> notes = new ArrayList<String>();
-
-        int driverHeat = 0;
-        if (tempF <= cfg.heatHighF) driverHeat = 3;
-        else if (tempF <= cfg.heatMedF) driverHeat = 2;
-        else if (tempF <= cfg.heatLowF) driverHeat = 1;
 
         if (driverHeat > 0) {
             addSeatAction(out, notes, readings, "seat_heat", "driver", driverHeat, false);
@@ -169,14 +325,13 @@ public final class ComfortPolicy {
                 addSeatAction(out, notes, readings, "seat_heat", "rear_right",
                         followerLevel(driverHeat, cfg.rearRightPolicy), true);
             }
-        } else if (cfg.ventEnabled && caps.isFrontVentSupported() && tempF >= cfg.ventLowF) {
-            int driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
+        } else if (driverVent > 0 && caps.isFrontVentSupported()) {
             addSeatAction(out, notes, readings, "seat_vent", "driver", driverVent, false);
             addPassengerSeatAction(out, notes, readings, "seat_vent",
                     followerLevel(driverVent, cfg.passengerPolicy), cfg.passengerAutoDetect, passengerPresence);
         }
 
-        if (cfg.wheelEnabled && tempF <= cfg.wheelF) {
+        if (wheelShouldRun) {
             String wh = readings == null ? null : readings.get("wheel_heat");
             if ("1".equals(wh)) {
                 notes.add("wheel already on");
@@ -187,8 +342,8 @@ public final class ComfortPolicy {
         }
 
         String summary = notes.isEmpty()
-                ? String.format(Locale.US, "No climate needed at %.1f F", Float.valueOf(tempF))
-                : String.format(Locale.US, "%.1f F: %s", Float.valueOf(tempF), join(notes));
+                ? "No climate needed at " + tempLabel
+                : tempLabel + ": " + join(notes);
         return new Plan(out, summary);
     }
 
@@ -200,6 +355,43 @@ public final class ComfortPolicy {
         return evaluatePassengerBoarding(
                 cfg, tempF, readings, passengerPresence,
                 OccupantSignalProbe.SeatCapabilities.UNKNOWN);
+    }
+
+    /**
+     * Unit-aware passenger boarding evaluation: compares {@code outside_temp} (°C) against {@code cfg.*C}
+     * when {@code metric} is true, or {@code outside_temp_f} (°F) against {@code cfg.*F} when false.
+     */
+    public static Plan evaluatePassengerBoarding(
+            ComfortConfig cfg,
+            Map<String, String> readings,
+            OccupantSignalProbe.PassengerPresence passengerPresence,
+            OccupantSignalProbe.SeatCapabilities seatCaps,
+            boolean metric) {
+        if (!metric) {
+            return evaluatePassengerBoarding(
+                    cfg, readAmbientF(readings), readings, passengerPresence, seatCaps);
+        }
+        float tempC = readAmbientC(readings);
+        if (!cfg.climateEnabled
+                || !cfg.passengerAutoDetect
+                || ComfortConfig.POLICY_OFF.equals(cfg.passengerPolicy)
+                || !validAmbientC(tempC)
+                || passengerPresence == null
+                || !passengerPresence.available
+                || !passengerPresence.occupied) {
+            return new Plan(Collections.<Action>emptyList(), "No passenger climate needed");
+        }
+        int driverHeat = 0;
+        if (tempC <= cfg.heatHighC) driverHeat = 3;
+        else if (tempC <= cfg.heatMedC) driverHeat = 2;
+        else if (tempC <= cfg.heatLowC) driverHeat = 1;
+
+        int driverVent = 0;
+        if (driverHeat == 0 && cfg.ventEnabled && tempC >= cfg.ventLowC) {
+            driverVent = tempC >= cfg.ventHighC ? 3 : (tempC >= cfg.ventMedC ? 2 : 1);
+        }
+        return buildPassengerBoardingPlan(
+                cfg, readings, seatCaps, driverHeat, driverVent, formatTenths(tempC) + "°C");
     }
 
     /**
@@ -221,6 +413,27 @@ public final class ComfortPolicy {
                 || !passengerPresence.occupied) {
             return new Plan(Collections.<Action>emptyList(), "No passenger climate needed");
         }
+        int driverHeat = 0;
+        if (tempF <= cfg.heatHighF) driverHeat = 3;
+        else if (tempF <= cfg.heatMedF) driverHeat = 2;
+        else if (tempF <= cfg.heatLowF) driverHeat = 1;
+
+        int driverVent = 0;
+        if (driverHeat == 0 && cfg.ventEnabled && tempF >= cfg.ventLowF) {
+            driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
+        }
+        return buildPassengerBoardingPlan(
+                cfg, readings, seatCaps, driverHeat, driverVent,
+                String.format(Locale.US, "%.1f F", Float.valueOf(tempF)));
+    }
+
+    private static Plan buildPassengerBoardingPlan(
+            ComfortConfig cfg,
+            Map<String, String> readings,
+            OccupantSignalProbe.SeatCapabilities seatCaps,
+            int driverHeat,
+            int driverVent,
+            String tempLabel) {
         if (isSeatAlreadyActive(readings, "passenger")) {
             return new Plan(Collections.<Action>emptyList(), "Passenger detected (seat already active)");
         }
@@ -228,29 +441,21 @@ public final class ComfortPolicy {
                 ? OccupantSignalProbe.SeatCapabilities.UNKNOWN
                 : seatCaps;
 
-        int driverHeat = 0;
-        if (tempF <= cfg.heatHighF) driverHeat = 3;
-        else if (tempF <= cfg.heatMedF) driverHeat = 2;
-        else if (tempF <= cfg.heatLowF) driverHeat = 1;
-
         if (driverHeat > 0) {
             int passHeat = followerLevel(driverHeat, cfg.passengerPolicy);
             if (passHeat > 0) {
                 String lvl = levelName(passHeat);
                 return new Plan(
                         Collections.singletonList(new Action("seat_heat", "passenger", lvl)),
-                        String.format(Locale.US, "Passenger detected (%.1f F): passenger heat %s",
-                                Float.valueOf(tempF), lvl));
+                        "Passenger detected (" + tempLabel + "): passenger heat " + lvl);
             }
-        } else if (cfg.ventEnabled && caps.isFrontVentSupported() && tempF >= cfg.ventLowF) {
-            int driverVent = tempF >= cfg.ventHighF ? 3 : (tempF >= cfg.ventMedF ? 2 : 1);
+        } else if (driverVent > 0 && caps.isFrontVentSupported()) {
             int passVent = followerLevel(driverVent, cfg.passengerPolicy);
             if (passVent > 0) {
                 String lvl = levelName(passVent);
                 return new Plan(
                         Collections.singletonList(new Action("seat_vent", "passenger", lvl)),
-                        String.format(Locale.US, "Passenger detected (%.1f F): passenger vent %s",
-                                Float.valueOf(tempF), lvl));
+                        "Passenger detected (" + tempLabel + "): passenger vent " + lvl);
             }
         }
         return new Plan(Collections.<Action>emptyList(), "No passenger climate needed");
